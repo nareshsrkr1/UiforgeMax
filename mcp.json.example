@@ -1,15 +1,15 @@
 {
   "mcpServers": {
     "uiforgemax": {
-      "command": "C:/path/to/UiforgeMax/.venv/Scripts/python.exe",
+      "command": "C:\\Users\\nares\\Projects\\UiForgeMax\\UiforgeMax\\.venv\\Scripts\\python.exe",
       "args": ["-m", "uiforgemax.server"],
       "env": {
-        "PYTHONPATH": "src",
-        "JIRA_BASE_URL": "https://your-jira-host",
-        "JIRA_EMAIL": "${env:JIRA_EMAIL}",
-        "JIRA_API_TOKEN": "${env:JIRA_API_TOKEN}"
+        "PYTHONPATH": "C:\\Users\\nares\\Projects\\UiForgeMax\\UiforgeMax\\src",
+        "UIFORGEMAX_DATA_ROOT": "C:\\Users\\nares\\.uiforgemax",
+        "JIRA_BASE_URL": "https://nareshsrkr-1784374271965.atlassian.net",
+        "JIRA_EMAIL": "naresh.srkr@gmail.com",
+        "JIRA_API_TOKEN": "TATT3xFfGF00t6ISYQru_AbYoXYFw5St-XGK8-EjTF6ou892Jkg7DHi7vJzpSz_3XxDtKEnt4uzSrqbDDF0Z6lSOwP814qVK4wX3XV0RPSGrjDWOyvxdAZMp33yOBKmEcPjYCIrR1mpFB9qHkJna5cozr-HjygFkfS8rVArIDnN_jJelLQeeTA=84E4E923"
       }
     }
   }
 }
-
