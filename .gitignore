@@ -1,0 +1,35 @@
+# Secrets & local config
+.env
+.env.*
+.cursor/mcp.json
+mcp.json
+
+# UiForgeMax run artifacts (may contain requirement text / Jira data)
+.uiforgemax/
+**/.uiforgemax/
+
+# Graphify analysis cache (regenerated on demand)
+graphify-out/
+**/graphify-out/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

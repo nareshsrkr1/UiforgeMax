@@ -1,0 +1,39 @@
+"""Handover report generation."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+
+def generate_handover(
+    run_dir: Path,
+    diff_summary: dict[str, Any],
+    test_results: dict[str, Any],
+) -> Path:
+    md = f"""# UiForgeMax Delivery Report
+
+## Summary
+Implementation completed on branch `{diff_summary.get('branch') or 'n/a'}`.
+
+## Files changed ({diff_summary.get('fileCount', 0)})
+{chr(10).join('- ' + f for f in diff_summary.get('filesChanged', []))}
+
+## Tests
+Passed: **{test_results.get('passed')}**
+Attempts: {len(test_results.get('attempts', []))}
+
+## Next steps
+1. Review the git branch in your workspace
+2. Run full test suite locally
+3. Merge when satisfied
+"""
+    out = run_dir / "handover" / "delivery-report.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(md, encoding="utf-8")
+    (run_dir / "handover" / "delivery-report.json").write_text(
+        json.dumps({"diff": diff_summary, "tests": test_results}, indent=2),
+        encoding="utf-8",
+    )
+    return out

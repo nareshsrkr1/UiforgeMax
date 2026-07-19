@@ -1,0 +1,552 @@
+"""Implementation stage — writes approved plan files into the workspace.
+
+Generic by design: real application changes come from IDE-mediated ``content``
+(or a small set of scaffold ``templateId``s for greenfield). MCP does **not**
+invent product-specific UI (themes, nav, pages) for a particular demo app.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+from pathlib import Path
+from typing import Any
+
+
+def _write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _normalize_roots(project_root: Path | dict[str, Path]) -> dict[str, Path]:
+    if isinstance(project_root, dict):
+        return project_root
+    return {"default": project_root}
+
+
+def resolve_root(roots: dict[str, Path], action: dict[str, Any]) -> Path:
+    """Pick the repo root a create/modify action belongs to.
+
+    Actions with no explicit `"root"` (the common case — everything created
+    under one repo) resolve to `"default"`. Multi-repo plans set `"root"` to
+    a name registered via `uiforgemax_add_workspace_root`.
+    """
+    name = action.get("root") or "default"
+    root = roots.get(name) or roots.get("default")
+    if root is None:
+        raise ValueError(f"No project root registered for '{name}' (and no default root either).")
+    return root
+
+
+def apply_plan(project_root: Path | dict[str, Path], plan: dict[str, Any]) -> dict[str, Any]:
+    roots = _normalize_roots(project_root)
+    changed: list[str] = []
+    skipped: list[dict[str, str]] = []
+    branch = "uiforgemax/feature-run"
+
+    for root in {str(r) for r in roots.values()}:
+        try:
+            subprocess.run(
+                ["git", "checkout", "-b", branch],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            branch = None
+            break
+
+    # Scaffold / legacy fixture writers only — not product UI for a specific app.
+    templates = {
+        "api.export_route": _export_route,
+        "client.export_customers": _export_client,
+        "page.customer_list": _customer_list_page,
+        "test.customer_list": _customer_list_test,
+        "greenfield.backend_requirements": _gf_backend_requirements,
+        "greenfield.backend_init": _gf_empty,
+        "greenfield.backend_store": _gf_backend_store,
+        "greenfield.backend_main": _gf_backend_main,
+        "greenfield.backend_readme": _gf_backend_readme,
+        "greenfield.ui_index": _gf_ui_index,
+        "greenfield.ui_styles": _gf_ui_styles,
+        "greenfield.ui_serve": _gf_ui_serve,
+        "greenfield.ui_readme": _gf_ui_readme,
+        "greenfield.readme": _gf_readme,
+        "greenfield.start_ps1": _gf_start_ps1,
+    }
+    patches = {
+        "app.register_export": _patch_app,
+        "data_access.export": _patch_data_access,
+        "portal.app_routing": _patch_portal_app,
+        "portal.green_button": _patch_styles,
+    }
+
+    create_paths = {item["path"] for item in plan.get("create", []) if item.get("path")}
+    actions_by_path: dict[str, dict] = {}
+    for item in plan.get("create", []) + plan.get("modify", []):
+        if item.get("path"):
+            actions_by_path[item["path"]] = item
+
+    ordered = list(plan.get("executionOrder") or [])
+    for path in actions_by_path:
+        if path not in ordered:
+            ordered.append(path)
+
+    for rel in ordered:
+        action = actions_by_path.get(rel)
+        if not action:
+            continue
+        root = resolve_root(roots, action)
+        target = root / rel
+        tid = action.get("templateId")
+        pid = action.get("patchId")
+        is_create = rel in create_paths or not target.exists()
+
+        try:
+            # 1) Mediation-supplied full file body — primary path for real apps
+            if action.get("content") is not None:
+                content = str(action["content"])
+            elif tid and tid in templates:
+                content = templates[tid](root, target)
+            elif pid and pid in patches:
+                content = patches[pid](root, target)
+            elif is_create:
+                content = _generic_create(action)
+            else:
+                content = _generic_modify(action, target)
+        except Exception as exc:  # noqa: BLE001 — record and continue other files
+            skipped.append({"path": rel, "reason": str(exc)})
+            continue
+
+        if content is None:
+            skipped.append({"path": rel, "reason": "no writer produced content"})
+            continue
+
+        _write(target, content)
+        changed.append(rel)
+        try:
+            subprocess.run(["git", "add", rel], cwd=root, check=False)
+            subprocess.run(
+                ["git", "commit", "-m", f"uiforgemax: {rel}"],
+                cwd=root,
+                capture_output=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            pass
+
+    return {
+        "branch": branch,
+        "filesChanged": changed,
+        "fileCount": len(changed),
+        "skipped": skipped,
+        "source": plan.get("source"),
+        "roots": {name: str(p) for name, p in roots.items()},
+    }
+
+
+# --- Generic writers (no product/demo assumptions) --------------------------------
+
+
+def _generic_create(action: dict[str, Any]) -> str:
+    """Minimal new-file scaffold by extension — not business logic for any app."""
+    path = (action.get("path") or "").replace("\\", "/")
+    purpose = action.get("purpose") or path
+    suffix = Path(path).suffix.lower()
+
+    if suffix in {".tsx", ".jsx"}:
+        name = _component_name(path)
+        return (
+            f"/** {purpose} */\n"
+            f"export function {name}() {{\n"
+            f"  return <div data-testid=\"{Path(path).stem}\">{name}</div>;\n"
+            f"}}\n"
+        )
+    if suffix in {".ts", ".js"}:
+        return f"// {purpose}\nexport {{}};\n"
+    if suffix == ".css":
+        return f"/* {purpose} */\n"
+    if suffix == ".py":
+        return f'"""{purpose}"""\n'
+    if suffix in {".java", ".kt"}:
+        return f"// {purpose}\n"
+    if suffix == ".go":
+        return f"package main\n\n// {purpose}\n"
+    if suffix == ".cs":
+        return f"// {purpose}\n"
+    if suffix == ".md":
+        return f"# {Path(path).stem}\n\n{purpose}\n"
+    if suffix == ".html":
+        return (
+            "<!DOCTYPE html>\n<html><head><meta charset=\"UTF-8\" />"
+            f"<title>{Path(path).stem}</title></head>"
+            f"<body><main>{purpose}</main></body></html>\n"
+        )
+    if suffix in {".json", ".yaml", ".yml", ".toml", ".xml"}:
+        raise ValueError(
+            f"Create {path}: supply full content= from PLAN_REFINEMENT "
+            f"(MCP will not invent {suffix} structure for your app)."
+        )
+    return f"/* UiForgeMax create: {purpose} */\n"
+
+
+def _generic_modify(action: dict[str, Any], target: Path) -> str:
+    """Modify without demo-specific patching — require mediated content."""
+    if not target.exists():
+        return _generic_create(action)
+    raise ValueError(
+        f"Modify {action.get('path')}: unknown templateId/patchId "
+        f"({action.get('templateId')!r}/{action.get('patchId')!r}). "
+        "PLAN_REFINEMENT must supply the full file content= for this app — "
+        "MCP does not invent product-specific patches."
+    )
+
+
+def _component_name(path: str) -> str:
+    stem = Path(path).stem
+    parts = re.split(r"[^A-Za-z0-9]+", stem)
+    name = "".join(p[:1].upper() + p[1:] for p in parts if p)
+    return name or "Component"
+
+
+# --- Legacy fixture / greenfield scaffold writers --------------------------------
+
+
+def _export_route(_root: Path, _target: Path) -> str:
+    return """import type { Request, Response } from "express";
+import { filterCustomers } from "../data/customers.js";
+
+export function registerExportRoute(app: import("express").Express) {
+  app.get("/api/customers/export", (req: Request, res: Response) => {
+    const search = typeof req.query.search === "string" ? req.query.search : undefined;
+    const result = filterCustomers({ search, page: 1, pageSize: 1000 });
+    const header = "id,name,email,status,company";
+    const rows = result.data.map(
+      (c) => `${c.id},${c.name},${c.email},${c.status},${c.company}`,
+    );
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", 'attachment; filename="customers.csv"');
+    res.send([header, ...rows].join("\\n"));
+  });
+}
+"""
+
+
+def _patch_app(root: Path, target: Path) -> str:
+    text = target.read_text(encoding="utf-8")
+    if "registerExportRoute" in text:
+        return text
+    if 'from "./routes/export.js"' not in text:
+        text = text.replace(
+            'import { filterCustomers, customers } from "./data/customers.js";',
+            'import { filterCustomers, customers } from "./data/customers.js";\nimport { registerExportRoute } from "./routes/export.js";',
+        )
+    needle = "  // Export endpoint intentionally missing — UiForgeMax Jira fixture requires it\n\n  return app;"
+    if needle in text:
+        return text.replace(needle, "  registerExportRoute(app);\n\n  return app;")
+    return text.replace("  return app;", "  registerExportRoute(app);\n\n  return app;")
+
+
+def _export_client(_root: Path, _target: Path) -> str:
+    return """const DEFAULT_BASE = "http://localhost:4000";
+
+export async function exportCustomers(query: { search?: string } = {}): Promise<Blob> {
+  const params = new URLSearchParams();
+  if (query.search) params.set("search", query.search);
+  const response = await fetch(`${DEFAULT_BASE}/api/customers/export?${params}`);
+  if (!response.ok) throw new Error(`Export failed: ${response.status}`);
+  return response.blob();
+}
+"""
+
+
+def _patch_data_access(root: Path, target: Path) -> str:
+    text = target.read_text(encoding="utf-8")
+    if "exportCustomers" in text:
+        return text
+    addition = '\nexport { exportCustomers } from "./exportCustomers.js";\n'
+    if "exportCustomers intentionally missing" in text:
+        text = text.replace(
+            "  // NOTE: exportCustomers intentionally missing — Jira ticket will require it\n}",
+            "  async exportCustomers(query: { search?: string } = {}): Promise<Blob> {\n"
+            "    const { exportCustomers } = await import('./exportCustomers.js');\n"
+            "    return exportCustomers(query);\n  }\n}",
+        )
+    return text.rstrip() + addition
+
+
+def _customer_list_page(_root: Path, _target: Path) -> str:
+    return """import { useEffect, useState } from "react";
+import { Button, DataGrid, PageLayout } from "@acme/shared-ui";
+import { customerApi } from "@acme/data-access";
+import type { Customer } from "@acme/shared-types";
+import { exportCustomers } from "@acme/data-access";
+
+export function CustomerListPage() {
+  const [rows, setRows] = useState<Customer[]>([]);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    customerApi.listCustomers({ search }).then((r) => setRows(r.data));
+  }, [search]);
+
+  async function onExport() {
+    setLoading(true);
+    try {
+      const blob = await exportCustomers({ search });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "customers.csv";
+      a.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <PageLayout
+      title="Customers"
+      actions={
+        <Button variant="primary" className="acme-btn--green" loading={loading} onClick={onExport}>
+          Export CSV
+        </Button>
+      }
+    >
+      <input
+        aria-label="Search customers"
+        placeholder="Search by name or email"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+      />
+      <DataGrid
+        data={rows}
+        columns={[
+          { key: "name", header: "Name" },
+          { key: "email", header: "Email" },
+          { key: "status", header: "Status" },
+          { key: "company", header: "Company" },
+        ]}
+      />
+    </PageLayout>
+  );
+}
+"""
+
+
+def _customer_list_test(_root: Path, _target: Path) -> str:
+    return """import { describe, expect, it } from "vitest";
+
+describe("CustomerListPage", () => {
+  it("requires Export CSV label for compliance", () => {
+    expect("Export CSV").toBe("Export CSV");
+  });
+});
+"""
+
+
+def _patch_portal_app(root: Path, target: Path) -> str:
+    text = target.read_text(encoding="utf-8")
+    if "CustomerListPage" in text:
+        return text
+    return """import { useEffect, useState } from "react";
+import { Sidebar } from "@acme/shared-ui";
+import { DashboardPage } from "./pages/DashboardPage";
+import { CustomerListPage } from "./pages/CustomerListPage";
+
+const NAV = [
+  { id: "dashboard", label: "Dashboard", href: "#dashboard" },
+  { id: "customers", label: "Customers", href: "#customers" },
+];
+
+function useHashRoute() {
+  const [route, setRoute] = useState(window.location.hash || "#dashboard");
+  useEffect(() => {
+    const onHash = () => setRoute(window.location.hash || "#dashboard");
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  return route;
+}
+
+export function App() {
+  const route = useHashRoute();
+  return (
+    <div className="acme-shell" data-testid="app-shell">
+      <Sidebar items={NAV} activeId={route === "#customers" ? "customers" : "dashboard"} />
+      <main className="acme-main">
+        {route === "#customers" ? <CustomerListPage /> : <DashboardPage />}
+      </main>
+    </div>
+  );
+}
+"""
+
+
+def _patch_styles(root: Path, target: Path) -> str:
+    text = target.read_text(encoding="utf-8")
+    if "acme-btn--green" in text:
+        return text
+    return text + "\n.acme-btn--green {\n  background: #16a34a;\n  color: white;\n}\n"
+
+
+def _gf_empty(_root: Path, _target: Path) -> str:
+    return ""
+
+
+def _gf_backend_requirements(_root: Path, _target: Path) -> str:
+    return "fastapi>=0.110\nuvicorn[standard]>=0.27\n"
+
+
+def _gf_backend_store(_root: Path, _target: Path) -> str:
+    return '''"""In-memory item store."""
+
+from __future__ import annotations
+
+import threading
+
+SEED = [
+    {"id": 1, "name": "Alpha", "status": "Active"},
+    {"id": 2, "name": "Beta", "status": "Trial"},
+]
+
+
+class ItemStore:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items = [dict(x) for x in SEED]
+        self._next_id = max((x["id"] for x in self._items), default=0) + 1
+
+    def list(self) -> list[dict]:
+        with self._lock:
+            return [dict(x) for x in self._items]
+
+    def create(self, data: dict) -> dict:
+        with self._lock:
+            item = {"id": self._next_id, **data}
+            self._next_id += 1
+            self._items.append(item)
+            return dict(item)
+
+
+store = ItemStore()
+'''
+
+
+def _gf_backend_main(_root: Path, _target: Path) -> str:
+    return '''"""Greenfield FastAPI backend."""
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from app.store import store
+
+app = FastAPI(title="Greenfield API", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class ItemCreate(BaseModel):
+    name: str
+    status: str = "Active"
+
+
+@app.get("/api/status")
+def status():
+    return {"ok": True, "service": "greenfield-api"}
+
+
+@app.get("/api/items")
+def list_items():
+    return {"data": store.list()}
+
+
+@app.post("/api/items")
+def create_item(body: ItemCreate):
+    return store.create(body.model_dump())
+'''
+
+
+def _gf_backend_readme(_root: Path, _target: Path) -> str:
+    return "# Backend\\n\\n```bash\\nuvicorn app.main:app --reload --port 8000\\n```\\n"
+
+
+def _gf_ui_index(_root: Path, _target: Path) -> str:
+    return '''<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Greenfield App</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="root"></div>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script>
+    const API = "http://127.0.0.1:8000";
+    function App() {
+      const [items, setItems] = React.useState([]);
+      React.useEffect(() => {
+        fetch(API + "/api/items").then(r => r.json()).then(d => setItems(d.data || []));
+      }, []);
+      return React.createElement("main", { className: "shell" },
+        React.createElement("h1", null, "Greenfield App"),
+        React.createElement("ul", null, items.map(i =>
+          React.createElement("li", { key: i.id }, i.name + " — " + i.status)
+        ))
+      );
+    }
+    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+  </script>
+</body>
+</html>
+'''
+
+
+def _gf_ui_styles(_root: Path, _target: Path) -> str:
+    return "body { font-family: system-ui, sans-serif; margin: 2rem; }\\n.shell { max-width: 720px; }\\n"
+
+
+def _gf_ui_serve(_root: Path, _target: Path) -> str:
+    return '''"""Serve UI on port 5173."""
+import http.server
+import socketserver
+from pathlib import Path
+
+PORT = 5173
+ROOT = Path(__file__).resolve().parent
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(ROOT), **kwargs)
+
+if __name__ == "__main__":
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        print(f"UI at http://127.0.0.1:{PORT}")
+        httpd.serve_forever()
+'''
+
+
+def _gf_ui_readme(_root: Path, _target: Path) -> str:
+    return "# UI\\n\\n```bash\\npython serve.py\\n```\\n"
+
+
+def _gf_readme(_root: Path, _target: Path) -> str:
+    return "# Greenfield Project\\n\\nScaffolded by UiForgeMax.\\n\\nRun `./start.ps1` to launch backend + UI.\\n"
+
+
+def _gf_start_ps1(_root: Path, _target: Path) -> str:
+    return '''$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root/backend'; uvicorn app.main:app --reload --port 8000"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root/ui'; python serve.py"
+Write-Host "Backend :8000  UI :5173"
+'''

@@ -1,0 +1,6 @@
+---
+description: UiForgeMax driving-agent rules — MCP-only tool allowlist and workflow
+alwaysApply: true
+---
+
+@agent/uiforgemax-agent.md

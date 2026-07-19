@@ -1,0 +1,39 @@
+[project]
+name = "uiforgemax"
+version = "0.1.0"
+description = "UiForgeMax — stage-gated MCP server that turns requirements (Jira, wireframe, image, HTML, prompt) into tested, PR-ready code with human gates and minimal token usage."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "UiForgeMax" }]
+dependencies = [
+    "mcp>=1.2.0",
+    "pydantic>=2.6",
+    "httpx>=0.27",
+    "graphifyy>=0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+uiforgemax = "uiforgemax.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/uiforgemax"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

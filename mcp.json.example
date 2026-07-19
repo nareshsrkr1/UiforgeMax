@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "uiforgemax": {
+      "command": "C:/path/to/UiforgeMax/.venv/Scripts/python.exe",
+      "args": ["-m", "uiforgemax.server"],
+      "env": {
+        "PYTHONPATH": "src",
+        "JIRA_BASE_URL": "https://your-jira-host",
+        "JIRA_EMAIL": "${env:JIRA_EMAIL}",
+        "JIRA_API_TOKEN": "${env:JIRA_API_TOKEN}"
+      }
+    }
+  }
+}
+
