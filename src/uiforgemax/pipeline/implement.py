@@ -13,6 +13,33 @@ from pathlib import Path
 from typing import Any
 
 
+class PartialImplementError(Exception):
+    """Raised by :func:`apply_plan` when some plan files were written but others
+    were skipped (no ``content`` supplied by PLAN_REFINEMENT mediation).
+
+    Attributes
+    ----------
+    changed:
+        Relative paths of files that were successfully written.
+    skipped:
+        List of ``{path, reason}`` dicts for files that could not be written.
+    branch:
+        Git branch name if a branch was created, or ``None`` if git is absent.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        changed: list[str],
+        skipped: list[dict[str, str]],
+        branch: str | None,
+    ) -> None:
+        super().__init__(message)
+        self.changed = changed
+        self.skipped = skipped
+        self.branch = branch
+
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -135,6 +162,27 @@ def apply_plan(project_root: Path | dict[str, Path], plan: dict[str, Any]) -> di
             )
         except FileNotFoundError:
             pass
+
+    # Hard-fail on partial writes: if some files were written but others were
+    # skipped, the plan has gaps that will produce broken or incomplete code.
+    # Surface this as an error immediately rather than silently committing
+    # partial work.  Callers can catch this and set status=FAILED.
+    if changed and skipped:
+        skipped_summary = "; ".join(
+            f"{s['path']} ({s['reason']})" for s in skipped
+        )
+        raise PartialImplementError(
+            f"PARTIAL IMPLEMENT: {len(changed)} file(s) written but "
+            f"{len(skipped)} file(s) were skipped.\n"
+            f"Skipped: {skipped_summary}\n"
+            "PLAN_REFINEMENT mediation must supply 'content' for every create/modify "
+            "action — MCP does not invent product-specific code for files it has not "
+            "been given content for.  Re-run PLAN_REFINEMENT mediation with 'content' "
+            "fields for each skipped path, then uiforgemax_advance.",
+            changed=changed,
+            skipped=skipped,
+            branch=branch,
+        )
 
     return {
         "branch": branch,

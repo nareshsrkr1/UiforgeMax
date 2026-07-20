@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from uiforgemax.pipeline.implement import apply_plan
+import pytest
+
+from uiforgemax.pipeline.implement import apply_plan, PartialImplementError
 
 
 def test_apply_plan_writes_mediated_content(tmp_path: Path):
+    """When every action has content= supplied, the plan succeeds cleanly."""
     root = tmp_path / "any-app"
     (root / "src").mkdir(parents=True)
     (root / "src" / "App.tsx").write_text("export function App() { return null }\n", encoding="utf-8")
@@ -41,7 +44,11 @@ def test_apply_plan_writes_mediated_content(tmp_path: Path):
     assert "NewThing" in (root / "src" / "App.tsx").read_text(encoding="utf-8")
 
 
-def test_modify_without_content_is_skipped_not_invented(tmp_path: Path):
+def test_all_skipped_plan_returns_empty_not_error(tmp_path: Path):
+    """When ALL actions are skipped (0 changed, N skipped) we return a dict, not an error.
+
+    PartialImplementError only fires when some files wrote AND some skipped.
+    """
     root = tmp_path / "any-app"
     (root / "src").mkdir(parents=True)
     (root / "src" / "App.tsx").write_text("export function App() { return null }\n", encoding="utf-8")
@@ -58,11 +65,43 @@ def test_modify_without_content_is_skipped_not_invented(tmp_path: Path):
         ],
         "executionOrder": ["src/App.tsx"],
     }
+    # All-skipped: 0 written, 1 skipped — no PartialImplementError, just a normal result.
     summary = apply_plan(root, plan)
     assert summary["fileCount"] == 0
     assert len(summary["skipped"]) == 1
-    assert "content=" in summary["skipped"][0]["reason"]
+    assert "content=" in summary["skipped"][0]["reason"] or "patchId" in summary["skipped"][0]["reason"]
     assert (root / "src" / "App.tsx").read_text(encoding="utf-8") == original
+
+
+def test_partial_skip_raises_error(tmp_path: Path):
+    """When some files write but others skip, PartialImplementError is raised.
+
+    This prevents silently committing broken/incomplete code.
+    """
+    root = tmp_path / "any-app"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "App.tsx").write_text("export function App() { return null }\n", encoding="utf-8")
+
+    plan = {
+        "create": [
+            # This will succeed — content is supplied
+            {"path": "NewFile.tsx", "content": "export const X = 1;\n", "purpose": "new", "root": "default"}
+        ],
+        "modify": [
+            # This will fail — no content, unknown patchId
+            {"path": "src/App.tsx", "purpose": "unknown patch", "patchId": "nonexistent", "root": "default"}
+        ],
+        "executionOrder": ["NewFile.tsx", "src/App.tsx"],
+    }
+    with pytest.raises(PartialImplementError) as exc_info:
+        apply_plan(root, plan)
+
+    err = exc_info.value
+    assert "NewFile.tsx" in err.changed
+    assert len(err.skipped) == 1
+    assert err.skipped[0]["path"] == "src/App.tsx"
+    assert "PARTIAL IMPLEMENT" in str(err)
+    assert "PLAN_REFINEMENT" in str(err)
 
 
 def test_greenfield_template_still_works(tmp_path: Path):
@@ -81,3 +120,4 @@ def test_greenfield_template_still_works(tmp_path: Path):
     summary = apply_plan(root, plan)
     assert summary["fileCount"] == 1
     assert "UiForgeMax" in (root / "README.md").read_text(encoding="utf-8")
+

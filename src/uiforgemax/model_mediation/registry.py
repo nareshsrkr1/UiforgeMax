@@ -176,24 +176,61 @@ def build_mediation_request(
         return {
             **base,
             "instruction": (
-                "Open the wireframe/image(s) from readImages. Check imageRoles — if before/after "
-                "screens are present, diff them and describe what changes (added/removed/restyled). "
-                "Extract layout, components, copy, colors, and interactions. Carry image reference "
-                "forward for plan and matchExactly compliance."
+                "Read the actual image(s) from readImages NOW.  The visual-spec.json on disk is "
+                "a provisional shell with visualSpecUnconfirmed=true and empty components/layout/tokens "
+                "(sentinel value '__UNCONFIRMED_PENDING_MEDIATION__').  You MUST replace the entire "
+                "shell with real data extracted from the image. Do NOT pass through the shell values.\n\n"
+                "If imageRoles contains before/after pairs, diff them and describe exactly what "
+                "changed (added/removed/restyled components, layout shifts, color/token changes).\n\n"
+                "Extract from the image(s):\n"
+                "- layout.regions: named regions with type (navigation, header, main, sidebar, etc.)\n"
+                "- components[]: EVERY visible component — type, label/text, variant, colorHint, "
+                "confidence. Do NOT invent components not visible in the image.\n"
+                "- interactions[]: user actions inferred from the design (buttons, links, form submits)\n"
+                "- visualTokens.colors[]: all distinct colors visible (hex or name + context)\n"
+                "- visualTokens.typography[]: font sizes, weights, families if readable\n"
+                "- visualTokens.spacing[]: gap/margin patterns if discernible\n"
+                "- matchExactly: true if the image is a pixel-perfect reference the implementation "
+                "must match exactly (look for 'match exactly', 'pixel perfect', or similar cues)\n"
+                "- exactTextRequirements[]: button/label text that must appear verbatim\n"
+                "- confidence: overall 0–1 score for how clearly the image is readable\n\n"
+                "Set visualSpecUnconfirmed=false in your output to signal the spec is now confirmed. "
+                "Output only valid JSON matching the outputSchema — no repo edits."
             ),
             "readArtifacts": ["requirements.normalized.json", "visual-spec.json", "request-classification.json"],
             "readImages": images,
             "imageRoles": image_roles,
             "outputSchema": {
-                "sourceImage": "string",
+                "sourceImage": "string — path to the primary image read",
+                "visualSpecUnconfirmed": False,
                 "matchExactly": "boolean",
                 "beforeAfterDiff": {"added": ["string"], "removed": ["string"], "changed": ["string"]},
-                "layout": {"regions": []},
-                "components": [],
-                "interactions": [],
-                "visualTokens": {"colors": [], "typography": []},
-                "exactTextRequirements": ["string"],
-                "confidence": "number",
+                "layout": {"regions": [{"id": "string", "type": "string", "confidence": 0.0}]},
+                "components": [
+                    {
+                        "type": "string — exact component type e.g. Button, Table, Form, Navigation",
+                        "label": "string (if applicable)",
+                        "text": "string (if applicable)",
+                        "variant": "string (if applicable)",
+                        "colorHint": "string (if applicable)",
+                        "confidence": 0.0,
+                    }
+                ],
+                "interactions": [
+                    {
+                        "trigger": "string",
+                        "expectedBehavior": "string",
+                        "confidence": 0.0,
+                        "needsConfirmation": False,
+                    }
+                ],
+                "visualTokens": {
+                    "colors": [{"value": "string", "context": "string"}],
+                    "typography": [{"element": "string", "size": "string", "weight": "string"}],
+                    "spacing": [{"context": "string", "value": "string"}],
+                },
+                "exactTextRequirements": ["string — text that must appear verbatim in the implementation"],
+                "confidence": "number 0–1",
             },
         }
 

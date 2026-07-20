@@ -20,7 +20,7 @@ from uiforgemax.pipeline.greenfield import (
     write_greenfield_graph_stubs,
 )
 from uiforgemax.pipeline.handover import generate_handover
-from uiforgemax.pipeline.implement import apply_plan
+from uiforgemax.pipeline.implement import apply_plan, PartialImplementError
 from uiforgemax.pipeline.normalize import normalize_run
 from uiforgemax.pipeline.planning import (
     build_plan_approval_package,
@@ -640,7 +640,61 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
     plan = _load_json(plan_path)
     expected = len(plan.get("create") or []) + len(plan.get("modify") or [])
     with StageTimer(run_dir, Stage.IMPLEMENT.value) as t:
-        summary = apply_plan(roots, plan)
+        try:
+            summary = apply_plan(roots, plan)
+        except PartialImplementError as exc:
+            # Some files were written, some were not.  Fail hard so the operator
+            # knows they need to re-run PLAN_REFINEMENT with content= fields.
+            t.stats = {
+                "filesChanged": len(exc.changed),
+                "skipped": len(exc.skipped),
+                "planSource": plan_path.name,
+                "partialFail": True,
+            }
+            partial_summary = {
+                "branch": exc.branch,
+                "filesChanged": exc.changed,
+                "fileCount": len(exc.changed),
+                "skipped": exc.skipped,
+                "source": plan.get("source"),
+                "roots": {name: str(p) for name, p in roots.items()},
+                "partialFail": True,
+            }
+            (run_dir / "implementation" / "diff-summary.json").write_text(
+                json.dumps(partial_summary, indent=2), encoding="utf-8"
+            )
+            state.artifacts["diffSummary"] = "implementation/diff-summary.json"
+            state.status = Status.FAILED
+            skipped_paths = [s["path"] for s in exc.skipped]
+            state.record(
+                Stage.IMPLEMENT,
+                "failed",
+                f"partial: {len(exc.changed)} written, {len(exc.skipped)} skipped={skipped_paths}",
+            )
+            return StageResult(
+                stop=True,
+                message=(
+                    f"IMPLEMENT FAILED (partial): {len(exc.changed)} file(s) written but "
+                    f"{len(exc.skipped)} skipped because PLAN_REFINEMENT mediation did not "
+                    f"supply 'content' for them.\n"
+                    f"Skipped paths: {skipped_paths}\n"
+                    "Fix: Re-run PLAN_REFINEMENT mediation and supply a full 'content' field "
+                    "for every skipped path, then call uiforgemax_advance."
+                ),
+                extra={
+                    "diffSummary": partial_summary,
+                    "partialFail": True,
+                    "skippedPaths": skipped_paths,
+                    "writtenPaths": exc.changed,
+                    "remediationHint": (
+                        "Re-run PLAN_REFINEMENT mediation (uiforgemax_submit_mediation) "
+                        "with 'content' for each skipped path. "
+                        "Read graph/source-snapshots.json for current file content to base "
+                        "modify actions on."
+                    ),
+                },
+            )
+
         t.stats = {
             "filesChanged": summary.get("fileCount", 0),
             "skipped": len(summary.get("skipped") or []),
@@ -667,6 +721,7 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
     state.status = Status.IMPLEMENTING
     state.record(Stage.IMPLEMENT, "ok", f"{count} files from {plan_path.name}")
     msg = f"Implemented {count} files from approved plan."
+    # All-zero-skipped path: greenfield / template-only plans may have no extra skips.
     if skipped:
         msg += f" ({len(skipped)} skipped: {skipped})"
     return StageResult(stop=False, message=msg)
