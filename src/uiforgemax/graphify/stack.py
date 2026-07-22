@@ -1,7 +1,8 @@
 """Cheap filesystem stack detection — before real Graphify runs.
 
-Nx is a *flavor* flag, never a hard gate. Detection is intentional and local
-(nx.json / FastAPI imports / React markers), not inferred only from a thin graph.
+Detects all major stacks (JS/TS, Python, Java, Go, .NET, Rust, Ruby, PHP,
+Angular, Vue, Svelte, etc.) by file markers. Stack is informational — never
+a hard gate. The pipeline works the same regardless of detected stack.
 """
 
 from __future__ import annotations
@@ -15,38 +16,57 @@ _IGNORED = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "bui
 def detect_stack(project_root: Path) -> dict[str, Any]:
     root = Path(project_root)
     empty = _is_empty(root)
-    # Nx config often lives on the monorepo parent while project_root is apps/<name>.
+
     nx = _has_nx_marker(root)
-    fastapi = _has_text_marker(root, (".py",), ("FastAPI", "from fastapi", "import fastapi"))
+
     react = (
         any(root.rglob("*.tsx"))
         or any(root.rglob("*.jsx"))
         or _has_text_marker(root, (".html", ".tsx", ".jsx", ".ts", ".js"), ("react", "ReactDOM", 'from "react"'))
     )
+    angular = (
+        (root / "angular.json").exists()
+        or _has_text_marker(root, (".ts",), ("@angular/core", "@Component", "@NgModule"))
+    )
+    vue = (
+        any(root.rglob("*.vue"))
+        or (root / "nuxt.config.ts").exists()
+        or (root / "nuxt.config.js").exists()
+        or _has_text_marker(root, (".ts", ".js"), ('from "vue"', "from 'vue'", "createApp"))
+    )
+    svelte = any(root.rglob("*.svelte")) or (root / "svelte.config.js").exists()
+
+    fastapi = _has_text_marker(root, (".py",), ("FastAPI", "from fastapi", "import fastapi"))
+    django = _has_text_marker(root, (".py",), ("from django", "import django", "DJANGO_SETTINGS_MODULE"))
+    flask = _has_text_marker(root, (".py",), ("from flask", "import flask", "Flask(__name__"))
     express = _has_text_marker(root, (".ts", ".js"), ("express()", 'from "express"', "from 'express'"))
+    spring = _has_text_marker(root, (".java", ".kt"), ("@SpringBootApplication", "org.springframework"))
+    dotnet = (root / "*.csproj").exists() or any(root.rglob("*.csproj")) or any(root.rglob("*.sln"))
+    golang = (root / "go.mod").exists()
+    rust = (root / "Cargo.toml").exists()
+    ruby = (root / "Gemfile").exists() or _has_text_marker(root, (".rb",), ("Rails.application", "class ApplicationController"))
+    php = _has_text_marker(root, (".php",), ("<?php", "namespace App"))
+    openfin = _has_text_marker(root, (".json", ".ts", ".js"), ("openfin", "fin.desktop", "fin.Platform"))
 
     kinds: list[str] = []
-    if nx:
-        kinds.append("nx")
-    if fastapi:
-        kinds.append("fastapi")
-    if express:
-        kinds.append("express")
-    if react:
-        kinds.append("react")
+    for name, detected in [
+        ("nx", nx), ("react", react), ("angular", angular), ("vue", vue),
+        ("svelte", svelte), ("fastapi", fastapi), ("django", django),
+        ("flask", flask), ("express", express), ("spring", spring),
+        ("dotnet", dotnet), ("golang", golang), ("rust", rust),
+        ("ruby", ruby), ("php", php), ("openfin", openfin),
+    ]:
+        if detected:
+            kinds.append(name)
 
     if empty:
         primary = "greenfield"
     elif nx:
         primary = "nx"
-    elif fastapi and react:
-        primary = "fastapi-react"
-    elif fastapi:
-        primary = "fastapi"
-    elif react:
-        primary = "react"
-    elif express:
-        primary = "express"
+    elif len(kinds) >= 2:
+        primary = "-".join(kinds[:2])
+    elif kinds:
+        primary = kinds[0]
     else:
         primary = "standard"
 
@@ -54,9 +74,21 @@ def detect_stack(project_root: Path) -> dict[str, Any]:
         "primary": primary,
         "kinds": kinds,
         "nx": nx,
-        "fastapi": fastapi,
         "react": react,
+        "angular": angular,
+        "vue": vue,
+        "svelte": svelte,
+        "fastapi": fastapi,
+        "django": django,
+        "flask": flask,
         "express": express,
+        "spring": spring,
+        "dotnet": dotnet,
+        "golang": golang,
+        "rust": rust,
+        "ruby": ruby,
+        "php": php,
+        "openfin": openfin,
         "empty": empty,
         "path": str(root.resolve()),
     }

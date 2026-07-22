@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from uiforgemax.mcp_response import tool_response
 from uiforgemax.model_mediation.registry import MediationKind, build_mediation_request
@@ -18,7 +19,49 @@ from uiforgemax.state.gates import assert_gate
 from uiforgemax.tools.context import ToolContext
 
 
-def submit_mediation(ctx: ToolContext, run_id: str, mediation_key: str, payload: str) -> str:
+def _resolve_payload(payload: str, payload_file: str | None, run_dir: Path) -> tuple[dict | None, str | None]:
+    """Resolve mediation payload from string, file path, or file: prefix.
+
+    Returns (data, error). On success error is None; on failure data is None.
+    """
+    # Explicit file parameter takes precedence.
+    if payload_file:
+        return _read_payload_file(payload_file, run_dir)
+
+    # file: prefix — agent writes payload to disk, passes path via MCP string param.
+    if payload.startswith("file:"):
+        return _read_payload_file(payload[5:].strip(), run_dir)
+
+    # Inline JSON (works for small payloads that fit in a single stdio line).
+    try:
+        return json.loads(payload), None
+    except json.JSONDecodeError as exc:
+        return None, f"payload must be valid JSON: {exc}"
+
+
+def _read_payload_file(raw_path: str, run_dir: Path) -> tuple[dict | None, str | None]:
+    """Read a JSON payload from a file path (absolute or relative to run dir)."""
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = run_dir / path
+    if not path.exists():
+        return None, f"payload file not found: {path}"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data, None
+    except json.JSONDecodeError as exc:
+        return None, f"payload file is not valid JSON: {exc}"
+    except OSError as exc:
+        return None, f"could not read payload file: {exc}"
+
+
+def submit_mediation(
+    ctx: ToolContext,
+    run_id: str,
+    mediation_key: str,
+    payload: str,
+    payload_file: str | None = None,
+) -> str:
     state = ctx.store.load(run_id)
     assert_gate("uiforgemax_submit_mediation", state)
     run_dir = ctx.store.run_dir(run_id)
@@ -30,10 +73,9 @@ def submit_mediation(ctx: ToolContext, run_id: str, mediation_key: str, payload:
             stop=True,
         )
 
-    try:
-        data = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        return tool_response(state, f"BLOCKED: payload must be valid JSON: {exc}", stop=True)
+    data, error = _resolve_payload(payload, payload_file, run_dir)
+    if error:
+        return tool_response(state, f"BLOCKED: {error}", stop=True)
 
     kind_str = mediation_key.split("::")[-1]
     kind = MediationKind(kind_str)

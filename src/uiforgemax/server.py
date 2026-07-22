@@ -220,9 +220,14 @@ def uiforgemax_approve_plan(run_id: str, by: str = "user") -> str:
 
 
 @mcp.tool()
-def uiforgemax_request_changes(run_id: str, feedback: str) -> str:
-    """Reject at a gate and delta-revise with feedback (no full restart)."""
-    return _guard(approvals.request_changes, _ctx, run_id, feedback)
+def uiforgemax_request_changes(
+    run_id: str,
+    feedback: str,
+    subtask_ids: list[str] | None = None,
+) -> str:
+    """Reject at a gate and delta-revise with feedback (no full restart).
+    Optional subtask_ids to scope the delta to specific sub-tasks only."""
+    return _guard(approvals.request_changes, _ctx, run_id, feedback, subtask_ids=subtask_ids)
 
 
 @mcp.tool()
@@ -245,9 +250,19 @@ def uiforgemax_answer_clarifications(run_id: str, answers: str) -> str:
 
 
 @mcp.tool()
-def uiforgemax_submit_mediation(run_id: str, mediation_key: str, payload: str) -> str:
-    """Submit IDE model mediation JSON for the pending stage (Cursor/VS Code — no MCP LLM keys)."""
-    return _guard(mediation.submit_mediation, _ctx, run_id, mediation_key, payload)
+def uiforgemax_submit_mediation(
+    run_id: str,
+    mediation_key: str,
+    payload: str = "{}",
+    payload_file: str | None = None,
+) -> str:
+    """Submit IDE model mediation JSON for the pending stage (Cursor/VS Code — no MCP LLM keys).
+
+    For large payloads (plans with full file contents), write the JSON to a file
+    and pass the path via `payload_file` (absolute, or relative to the run dir).
+    Alternatively, set payload to 'file:<path>' to read from that path.
+    When payload_file is set, the payload string parameter is ignored."""
+    return _guard(mediation.submit_mediation, _ctx, run_id, mediation_key, payload, payload_file)
 
 
 def main() -> None:

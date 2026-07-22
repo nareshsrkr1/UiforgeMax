@@ -24,6 +24,7 @@ _ALWAYS = {
     Stage.ARCH_DETECT,
     Stage.CLASSIFY,
     Stage.NORMALIZE,
+    Stage.DECOMPOSE,
     Stage.UNDERSTANDING,
     Stage.GATE_UNDERSTANDING,
     Stage.PLAN,
@@ -45,6 +46,8 @@ _GRAPH_STAGES = {
 _API_STAGES = {Stage.API_RESOLVE, Stage.GATE_API}
 
 _VISUAL_STAGES = {Stage.IMAGE_CONVERT}
+
+_VISUAL_VALIDATE_STAGES = {Stage.VISUAL_VALIDATE}
 
 
 def flow_path(run_dir: Path) -> Path:
@@ -125,6 +128,12 @@ def build_flow_plan(
                 active.append(stage.value)
             else:
                 skipped[stage.value] = _skip_reason("api", surface)
+            continue
+        if stage in _VISUAL_VALIDATE_STAGES:
+            if run_visual and has_images:
+                active.append(stage.value)
+            else:
+                skipped[stage.value] = _skip_reason("visual_validate", surface, has_images)
             continue
         active.append(stage.value)
 
@@ -225,4 +234,6 @@ def _skip_reason(kind: str, *parts: Any) -> str:
         return f"visual skipped (surface={parts[0]!r}, hasImages={parts[1]!r})"
     if kind == "api":
         return f"api skipped (surface={parts[0]!r})"
+    if kind == "visual_validate":
+        return f"visual_validate skipped (surface={parts[0]!r}, hasImages={parts[1]!r})"
     return f"{kind} skipped"

@@ -288,6 +288,52 @@ def _normalize(ctx: ToolContext, state: RunState) -> StageResult:
     return StageResult(stop=False, message="Normalized requirements + visual-spec.")
 
 
+def _decompose(ctx: ToolContext, state: RunState) -> StageResult:
+    from uiforgemax.pipeline.decompose import (
+        auto_decompose,
+        load_subtasks,
+        should_auto_decompose,
+    )
+
+    run_dir = _run_dir(ctx, state)
+    subtasks_path = run_dir / "plans" / "subtasks.json"
+
+    if subtasks_path.exists():
+        subtasks = _load_json(subtasks_path)
+        state.artifacts["subtasks"] = "plans/subtasks.json"
+        state.status = Status.DECOMPOSED
+        state.record(Stage.DECOMPOSE, "ok", f"{subtasks.get('subtaskCount', 1)} subtask(s)")
+        return StageResult(stop=False, message=f"Subtasks already exist ({subtasks.get('subtaskCount', 1)}).")
+
+    reqs_path = run_dir / "requirements.normalized.json"
+    reqs = _load_json(reqs_path) if reqs_path.exists() else {}
+    classification = _load_classification(run_dir)
+    visual_path = run_dir / "visual-spec.json"
+    visual = _load_json(visual_path) if visual_path.exists() else None
+
+    if should_auto_decompose(reqs, classification):
+        subtasks = auto_decompose(reqs, classification, visual)
+        subtasks_path.parent.mkdir(parents=True, exist_ok=True)
+        subtasks_path.write_text(json.dumps(subtasks, indent=2), encoding="utf-8")
+        state.artifacts["subtasks"] = "plans/subtasks.json"
+        state.status = Status.DECOMPOSED
+        state.record(Stage.DECOMPOSE, "ok", "auto (simple request)")
+        return StageResult(stop=False, message="Simple request — auto-wrapped as single sub-task.")
+
+    pause = _maybe_pause_mediation(ctx, state, Stage.DECOMPOSE)
+    if pause:
+        return pause
+
+    subtasks = load_subtasks(run_dir)
+    if not subtasks:
+        return StageResult(stop=True, message="BLOCKED: subtasks.json missing after mediation.")
+
+    state.artifacts["subtasks"] = "plans/subtasks.json"
+    state.status = Status.DECOMPOSED
+    state.record(Stage.DECOMPOSE, "ok", f"{subtasks.get('subtaskCount', 1)} subtask(s) via IDE mediation")
+    return StageResult(stop=False, message=f"Decomposed into {subtasks.get('subtaskCount', 1)} sub-task(s).")
+
+
 def _graphify_update(ctx: ToolContext, state: RunState) -> StageResult:
     """Per-repo real Graphify: ``python -m graphify update <root>`` → ``graphify-out/``."""
     roots = _project_roots(ctx, state)
@@ -379,6 +425,11 @@ def _graph_merge(ctx: ToolContext, state: RunState) -> StageResult:
 
 def _graph_query_plan(ctx: ToolContext, state: RunState) -> StageResult:
     run_dir = _run_dir(ctx, state)
+
+    pause = _maybe_pause_mediation(ctx, state, Stage.GRAPH_QUERY_PLAN)
+    if pause:
+        return pause
+
     reqs = _load_json(run_dir / "requirements.normalized.json")
     with StageTimer(run_dir, Stage.GRAPH_QUERY_PLAN.value) as t:
         plan = stage_query_plan(run_dir, reqs)
@@ -469,11 +520,18 @@ def _api_resolve(ctx: ToolContext, state: RunState) -> StageResult:
 
 
 def _gate_api(ctx: ToolContext, state: RunState) -> StageResult:
+    """Auto-pass — sole human gate is plan approval only."""
+    from datetime import datetime, timezone
+
     if state.approvals.api.required and not state.approvals.api.approved:
-        state.status = Status.AWAITING_API_APPROVAL
-        return StageResult(stop=True, message="GATE 1: uiforgemax_approve_api or request_changes.")
-    state.record(Stage.GATE_API, "ok", "passed")
-    return StageResult(stop=False, message="Gate 1 passed.")
+        state.approvals.api.approved = True
+        state.approvals.api.by = "system-auto"
+        state.approvals.api.at = datetime.now(timezone.utc).isoformat()
+    state.record(Stage.GATE_API, "ok", "auto-passed; sole human gate is plan")
+    return StageResult(
+        stop=False,
+        message="API gate auto-passed (sole human gate is plan approval).",
+    )
 
 
 def _understanding(ctx: ToolContext, state: RunState) -> StageResult:
@@ -632,16 +690,19 @@ def _gate_plan(ctx: ToolContext, state: RunState) -> StageResult:
 
 
 def _implement(ctx: ToolContext, state: RunState) -> StageResult:
+    from uiforgemax.pipeline.decompose import load_subtasks
+
     roots = _project_roots(ctx, state)
     run_dir = _run_dir(ctx, state)
     # Prefer the frozen snapshot from approve_plan so mediation cannot drift the plan.
     approved_path = run_dir / "plans" / "approved-plan.json"
     plan_path = approved_path if approved_path.exists() else run_dir / "plans" / "implementation-plan.json"
     plan = _load_json(plan_path)
+    subtasks = load_subtasks(run_dir)
     expected = len(plan.get("create") or []) + len(plan.get("modify") or [])
     with StageTimer(run_dir, Stage.IMPLEMENT.value) as t:
         try:
-            summary = apply_plan(roots, plan)
+            summary = apply_plan(roots, plan, subtasks=subtasks)
         except PartialImplementError as exc:
             # Some files were written, some were not.  Fail hard so the operator
             # knows they need to re-run PLAN_REFINEMENT with content= fields.
@@ -719,11 +780,21 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
             extra={"diffSummary": summary},
         )
     state.status = Status.IMPLEMENTING
+    if summary.get("subtaskResults"):
+        for st_id, st_res in summary["subtaskResults"].items():
+            state.subtask_progress[st_id] = st_res.get("status", "completed")
     state.record(Stage.IMPLEMENT, "ok", f"{count} files from {plan_path.name}")
     msg = f"Implemented {count} files from approved plan."
-    # All-zero-skipped path: greenfield / template-only plans may have no extra skips.
+    if summary.get("subtaskResults"):
+        msg += f" ({len(summary['subtaskResults'])} sub-tasks)"
     if skipped:
         msg += f" ({len(skipped)} skipped: {skipped})"
+
+    pause = _maybe_pause_mediation(ctx, state, Stage.IMPLEMENT)
+    if pause:
+        pause.message = f"{msg} — POST_IMPLEMENT_REVIEW mediation required."
+        return pause
+
     return StageResult(stop=False, message=msg)
 
 
@@ -865,6 +936,68 @@ def _test(ctx: ToolContext, state: RunState) -> StageResult:
     return StageResult(stop=False, message=f"Tests passed.{cov_note}{skip_note}")
 
 
+def _visual_validate(ctx: ToolContext, state: RunState) -> StageResult:
+    from uiforgemax.pipeline.visual_validate import (
+        prepare_delta_reimplementation,
+        should_run_visual_validation,
+    )
+
+    run_dir = _run_dir(ctx, state)
+
+    if not should_run_visual_validation(run_dir, state):
+        state.record(Stage.VISUAL_VALIDATE, "skipped", "no visual input")
+        return StageResult(stop=False, message="Visual validation skipped (no visual reference).")
+
+    pause = _maybe_pause_mediation(ctx, state, Stage.VISUAL_VALIDATE)
+    if pause:
+        return pause
+
+    validation_path = run_dir / "implementation" / "visual-validation.json"
+    if not validation_path.exists():
+        state.record(Stage.VISUAL_VALIDATE, "skipped", "no validation result")
+        return StageResult(stop=False, message="Visual validation skipped (no result file).")
+
+    validation = _load_json(validation_path)
+
+    if validation.get("passesVisualGate"):
+        state.status = Status.VISUAL_VALIDATED
+        fidelity = validation.get("overallFidelity", "?")
+        state.record(Stage.VISUAL_VALIDATE, "ok", f"fidelity={fidelity}")
+        return StageResult(stop=False, message=f"Visual validation passed (fidelity={fidelity}).")
+
+    attempt = validation.get("_attempt", 1)
+    if attempt >= 2:
+        state.status = Status.VISUAL_VALIDATED
+        state.record(Stage.VISUAL_VALIDATE, "warn", "max attempts reached, proceeding")
+        return StageResult(
+            stop=False,
+            message="Visual validation failed after 2 attempts — proceeding to tests with warnings.",
+        )
+
+    failed = [r for r in validation.get("subtaskResults", []) if r.get("needsReimplementation")]
+    failed_ids = [r["subtaskId"] for r in failed]
+
+    prepare_delta_reimplementation(run_dir, state, failed, attempt=attempt)
+
+    state.status = Status.PLAN_READY
+    state.current_stage = Stage.PLAN
+    state.record(Stage.VISUAL_VALIDATE, "failed", f"re-impl subtasks: {failed_ids}")
+
+    return StageResult(
+        stop=True,
+        message=(
+            f"VISUAL VALIDATION FAILED: {len(failed)} sub-task(s) need delta re-implementation: "
+            f"{failed_ids}. Pipeline rewound to PLAN stage for targeted fixes. "
+            "Call uiforgemax_advance to re-plan and re-implement only affected sub-tasks."
+        ),
+        extra={
+            "visualValidation": validation,
+            "failedSubtasks": failed_ids,
+            "deltaReimplementation": True,
+        },
+    )
+
+
 def _handover(ctx: ToolContext, state: RunState) -> StageResult:
     run_dir = _run_dir(ctx, state)
     diff = _load_json(run_dir / "implementation" / "diff-summary.json")
@@ -882,6 +1015,7 @@ _HANDLERS = {
     Stage.CLASSIFY: _classify,
     Stage.IMAGE_CONVERT: _image_convert,
     Stage.NORMALIZE: _normalize,
+    Stage.DECOMPOSE: _decompose,
     Stage.GRAPHIFY_UPDATE: _graphify_update,
     Stage.GRAPH_MERGE: _graph_merge,
     Stage.GRAPH_QUERY_PLAN: _graph_query_plan,
@@ -895,6 +1029,7 @@ _HANDLERS = {
     Stage.PLAN_REVIEW: _plan_review,
     Stage.GATE_PLAN: _gate_plan,
     Stage.IMPLEMENT: _implement,
+    Stage.VISUAL_VALIDATE: _visual_validate,
     Stage.TEST: _test,
     Stage.HANDOVER: _handover,
 }

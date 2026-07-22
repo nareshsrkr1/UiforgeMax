@@ -86,11 +86,19 @@ uiforgemax_answer_clarifications
 **Graphify** is the real CLI (`pip install graphifyy` → `python -m graphify update/query`).
 Preflight must find it on the session python. Artifacts land in each repo's `graphify-out/`.
 
-## Cursor setup
+## IDE setup
 
-- Set this doc as your default Agent rule (workspace `AGENTS.md` + this file).
+### Cursor
+- Set this doc as your default Agent rule (`.cursor/rules/uiforgemax-agent.mdc` pointing to this file).
 - Mode: **Agent** — any capable model; no Bugbot/subagent required.
 - MCP: `.cursor/mcp.json` → venv python + Jira env vars.
+- Invoke via `/uiforge` or agent mode.
+
+### VS Code (Copilot Chat)
+- Copy this file as your agent instructions (e.g. `.github/copilot-instructions.md` or workspace agent config).
+- MCP: same `.cursor/mcp.json` format works — VS Code reads `mcp.json` from `.vscode/` too.
+  Copy/symlink `.cursor/mcp.json` → `.vscode/mcp.json` if needed.
+- The tool allowlist and flow are identical — both IDEs call the same MCP tools.
 
 ## project_root examples
 
@@ -114,11 +122,22 @@ tests only. Real apps may be any stack or domain. PLAN_REFINEMENT must supply fu
 3. uiforgemax_add_jira(run_id, "SCRUM-5")   # required for tickets — not add_prompt with invented text
    (add_prompt / add_image only for free-text or visuals)
 4. uiforgemax_advance → mediation pauses → uiforgemax_submit_mediation
+   - DECOMPOSE stage: complex requests (>2 ACs) pause for TASK_DECOMPOSITION mediation.
+     The IDE model splits work into ordered sub-tasks (visual_regions, ac_grouping,
+     dependency_graph, domain_split). Simple requests (≤2 ACs) auto-wrap into ST-ALL
+     with no mediation. Sub-tasks drive per-sub-task Graphify queries and structured plans.
 5. Sole human gate: **STOP** at `awaiting_plan_approval` (`waitForHuman: true`,
-   `nextTool` is null). Display `planApproval` fully. **Do not** call `approve_plan`
-   until the human explicitly says approve. Then `advance` → implement → tests.
+   `nextTool` is null). Display `planApproval` fully — including `subtaskBreakdown`
+   when present (strategy, dependency order, per-sub-task files and ACs).
+   **Do not** call `approve_plan` until the human explicitly says approve.
+   GATE_API is auto-approved (no longer a human gate). Only GATE_PLAN stops.
+   Then `advance` → implement → post-implement review → visual validate → tests.
    - Understanding is auto-recorded (no separate approve_understanding).
    - Dev/CI: `UIFORGEMAX_SKIP_PLAN_APPROVAL=1` skips the human gate.
+   - VISUAL_VALIDATE stage (after implement, only when images/wireframes exist): pauses for
+     VISUAL_VALIDATION mediation. The IDE model scores fidelity per sub-task (0–1). Sub-tasks
+     below 0.7 trigger delta re-implementation (pipeline rewinds to PLAN for those sub-tasks
+     only, max 2 attempts). No visual input → stage auto-skips.
    - Tests are stack-dynamic via TEST_GENERATION — the IDE model owns install +
      run strategy (`installHints[]` + `run[]`). MCP executes allowlisted installs
      and rewrites npm/node paths; it does not invent a fixed install workflow.
@@ -128,11 +147,49 @@ tests only. Real apps may be any stack or domain. PLAN_REFINEMENT must supply fu
      `tests/playwright-status.json` — unit/DOM still decide pass. On env gaps, read
      `tests/toolchain-facts.json` and submit TEST_ENV_RECOVERY (`installHints`
      required when `needInstallAny=true`).
+   - `uiforgemax_request_changes` accepts optional `subtask_ids` list to scope delta
+     revisions to specific sub-tasks only (e.g. re-plan just ST-2 and ST-3).
 ```
+
+## Pipeline stages (22-stage deterministic pipeline)
+
+```
+INTAKE → ARCH_DETECT → CLASSIFY → IMAGE_CONVERT
+  → NORMALIZE (INTAKE_RECONCILIATION if Jira conflicts + REQUIREMENT_ANALYSIS + VISUAL_INTERPRETATION)
+  → DECOMPOSE (IDE mediation for complex, auto for simple ≤2 ACs)
+  → GRAPHIFY_UPDATE → GRAPH_MERGE
+  → GRAPH_QUERY_PLAN (QUERY_STRATEGY mediation — IDE decides what to search)
+  → GRAPH_QUERY_EXEC
+  → REQUIREMENT_MAP (GRAPH_EXPLAIN + REQ_MAP_VALIDATION coverage check)
+  → API_RESOLVE → GATE_API (auto-approved)
+  → UNDERSTANDING → GATE_UNDERSTANDING (auto-approved)
+  → PLAN (subtaskPlan structure) → PLAN_REVIEW → GATE_PLAN [SOLE HUMAN APPROVAL]
+  → IMPLEMENT (per sub-task, git commits) → POST_IMPLEMENT_REVIEW
+  → VISUAL_VALIDATE (only when images exist, max 2 delta attempts)
+  → TEST → HANDOVER
+```
+
+## Mediation kinds (13 total)
+
+| Kind | Stage | When |
+|------|-------|------|
+| REQUEST_CLASSIFICATION | CLASSIFY | Always |
+| INTAKE_RECONCILIATION | NORMALIZE | When Jira has comments/edits (conflict resolution) |
+| REQUIREMENT_ANALYSIS | NORMALIZE | Always (produces mandatory graphSearchStrategy) |
+| VISUAL_INTERPRETATION | NORMALIZE | When images exist |
+| TASK_DECOMPOSITION | DECOMPOSE | >2 ACs (skipped for simple). Produces searchContext per sub-task |
+| QUERY_STRATEGY | GRAPH_QUERY_PLAN | Always (IDE sees graph structure + requirements, decides what to search) |
+| GRAPH_EXPLAIN | REQUIREMENT_MAP | When useGraph=true |
+| REQ_MAP_VALIDATION | REQUIREMENT_MAP | Always (coverage check after graph explain) |
+| PLAN_REFINEMENT | PLAN | Always |
+| POST_IMPLEMENT_REVIEW | IMPLEMENT | Always (code review against plan) |
+| VISUAL_VALIDATION | VISUAL_VALIDATE | When images exist |
+| TEST_GENERATION | TEST | Always |
+| TEST_ENV_RECOVERY | TEST | On env gap |
 
 ## Dynamic flow
 
-After classify, `run-flow.json` skips irrelevant stages (ui_only → no API; greenfield → no graph). Classification JSON may set `useGraph`, `runApi`, `runVisual`, `greenfieldScaffold`.
+After classify, `run-flow.json` skips irrelevant stages (ui_only → no API; greenfield → no graph). Classification JSON may set `useGraph`, `runApi`, `runVisual`, `greenfieldScaffold`. DECOMPOSE always runs (simple requests auto-wrap). VISUAL_VALIDATE only runs when `runVisual=true` and images exist. GATE_API is always auto-approved (sole human gate is GATE_PLAN). INTAKE_RECONCILIATION fires at NORMALIZE only when Jira has comments/changelog. REQ_MAP_VALIDATION fires after GRAPH_EXPLAIN. POST_IMPLEMENT_REVIEW fires after every implementation.
 
 ## Multiple components in one run
 

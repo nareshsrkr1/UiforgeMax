@@ -84,14 +84,61 @@ def stage_query_plan(
     classification: dict[str, Any] | None = None,
     stack: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from uiforgemax.pipeline.decompose import load_subtasks, subtask_ac_slice
+
     visual = load_visual_spec(run_dir)
     classification = classification or _load_classification(run_dir)
     stack = stack or _stack_from_run(run_dir)
-    plan = plan_queries(requirements, visual, classification=classification, stack=stack)
+
+    subtasks = load_subtasks(run_dir)
+    if subtasks and subtasks.get("subtaskCount", 0) > 1:
+        return _stage_query_plan_subtasked(
+            run_dir, requirements, subtasks,
+            visual=visual, classification=classification, stack=stack,
+        )
+
+    plan = plan_queries(requirements, visual, classification=classification, stack=stack, run_dir=run_dir)
     graph_dir = run_dir / "graph"
     graph_dir.mkdir(parents=True, exist_ok=True)
     (graph_dir / "queries.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
     return plan
+
+
+def _stage_query_plan_subtasked(
+    run_dir: Path,
+    requirements: dict[str, Any],
+    subtasks: dict[str, Any],
+    *,
+    visual: dict[str, Any] | None = None,
+    classification: dict[str, Any] | None = None,
+    stack: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from uiforgemax.pipeline.decompose import subtask_ac_slice
+
+    all_queries: list[dict[str, Any]] = []
+    per_subtask_plans: list[dict[str, Any]] = []
+
+    for st in subtasks.get("subtasks", []):
+        st_reqs = subtask_ac_slice(st, requirements)
+        st_plan = plan_queries(
+            st_reqs, visual,
+            classification=classification, stack=stack,
+            subtask=st, run_dir=run_dir,
+        )
+        per_subtask_plans.append(st_plan)
+        all_queries.extend(st_plan.get("queries", []))
+
+    merged = {
+        "queryCount": len(all_queries),
+        "queries": all_queries,
+        "perSubtask": per_subtask_plans,
+        "strategy": "per_subtask",
+        "engine": "graphify-cli",
+    }
+    graph_dir = run_dir / "graph"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    (graph_dir / "queries.json").write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    return merged
 
 
 def stage_query_exec(
@@ -118,11 +165,15 @@ def stage_requirement_map(
     requirements: dict[str, Any],
     graph_index: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from uiforgemax.pipeline.decompose import load_subtasks
+
     visual = load_visual_spec(run_dir)
     results = json.loads((run_dir / "graph" / "query-results.json").read_text(encoding="utf-8"))
     classification = _load_classification(run_dir)
+    subtasks = load_subtasks(run_dir)
     req_map = build_requirement_map(
-        requirements, results, visual, classification=classification
+        requirements, results, visual,
+        classification=classification, subtasks=subtasks,
     )
     (run_dir / "graph" / "requirement-map.json").write_text(json.dumps(req_map, indent=2), encoding="utf-8")
     pack = _slim_context_pack(req_map, graph_index or {})

@@ -317,7 +317,20 @@ def run_merge_graphs(graph_jsons: list[Path], out_path: Path) -> dict[str, Any]:
     return {"mergedGraph": str(out_path), **summary, "stdout": (proc.stdout or "").strip()}
 
 
+_graph_summary_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
 def _summarize_graph(graph_path: Path) -> dict[str, Any]:
+    key = str(graph_path)
+    try:
+        mtime = graph_path.stat().st_mtime
+    except OSError:
+        return {"nodeCount": 0, "edgeCount": 0, "sourceFiles": []}
+
+    cached = _graph_summary_cache.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+
     try:
         data = json.loads(graph_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -331,7 +344,9 @@ def _summarize_graph(graph_path: Path) -> dict[str, Any]:
             if isinstance(n, dict) and n.get("source_file")
         }
     )
-    return {"nodeCount": len(nodes), "edgeCount": len(links), "sourceFiles": files}
+    result = {"nodeCount": len(nodes), "edgeCount": len(links), "sourceFiles": files}
+    _graph_summary_cache[key] = (mtime, result)
+    return result
 
 
 _NODE_LINE = re.compile(

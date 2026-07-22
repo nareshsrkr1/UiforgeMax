@@ -28,6 +28,7 @@ class Stage(str, Enum):
     CLASSIFY = "0.6_classify"
     IMAGE_CONVERT = "1_image_convert"
     NORMALIZE = "2_normalize"
+    DECOMPOSE = "2.5_decompose"
     GRAPHIFY_UPDATE = "3_graphify_update"
     GRAPH_MERGE = "3.5_graph_merge"
     GRAPH_QUERY_PLAN = "4_graph_query_plan"
@@ -41,6 +42,7 @@ class Stage(str, Enum):
     PLAN_REVIEW = "8_plan_review"
     GATE_PLAN = "8.5_gate_plan"
     IMPLEMENT = "9_implement"
+    VISUAL_VALIDATE = "9.5_visual_validate"
     TEST = "10_test"
     HANDOVER = "11_handover"
 
@@ -52,6 +54,7 @@ class Stage(str, Enum):
             cls.CLASSIFY,
             cls.IMAGE_CONVERT,
             cls.NORMALIZE,
+            cls.DECOMPOSE,
             cls.GRAPHIFY_UPDATE,
             cls.GRAPH_MERGE,
             cls.GRAPH_QUERY_PLAN,
@@ -65,6 +68,7 @@ class Stage(str, Enum):
             cls.PLAN_REVIEW,
             cls.GATE_PLAN,
             cls.IMPLEMENT,
+            cls.VISUAL_VALIDATE,
             cls.TEST,
             cls.HANDOVER,
         ]
@@ -81,6 +85,7 @@ class Status(str, Enum):
     CLASSIFIED = "classified"
     IMAGE_CONVERTED = "image_converted"
     NORMALIZED = "normalized"
+    DECOMPOSED = "decomposed"
     GRAPH_READY = "graph_ready"
     GRAPH_MERGED = "graph_merged"
     GRAPH_QUERIED = "graph_queried"
@@ -97,6 +102,7 @@ class Status(str, Enum):
     TESTING = "testing"
     AWAITING_USER_INSTALL = "awaiting_user_install"
     VALIDATING = "validating"
+    VISUAL_VALIDATED = "visual_validated"
     COMPLETED = "completed"
     FAILED = "failed"
     BLOCKED = "blocked"
@@ -153,6 +159,7 @@ class RunState(BaseModel):
     artifacts: dict = Field(default_factory=dict)
     approvals: Approvals = Field(default_factory=Approvals)
     mediation: dict = Field(default_factory=dict)
+    subtask_progress: dict = Field(default_factory=dict)
     history: list[HistoryEntry] = Field(default_factory=list)
     created_at: str = Field(default_factory=_now)
     updated_at: str = Field(default_factory=_now)
@@ -250,5 +257,5 @@ class RunStore:
 
     def _ensure_dirs(self, run_id: str) -> None:
         base = self.run_dir(run_id)
-        for sub in ("inputs", "graph", "plans", "implementation", "tests", "handover", "mediation"):
+        for sub in ("inputs", "graph", "plans", "implementation", "tests", "handover", "mediation", "subtasks"):
             (base / sub).mkdir(parents=True, exist_ok=True)

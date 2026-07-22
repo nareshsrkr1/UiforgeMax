@@ -6,8 +6,18 @@ from typing import Any
 
 from uiforgemax.pipeline.target_sanitize import sanitize_requirement_map
 
-_API_PATH_HINTS = ("customer-api", "/routes/", "data-access", "exportCustomers", "export.ts", "app.ts")
-_UI_PATH_HINTS = ("portal", "/pages/", ".tsx", "styles.css", "App.tsx", "CustomerList")
+_API_PATH_HINTS = (
+    "/routes/", "/api/", "/controllers/", "/handlers/", "/endpoints/",
+    "/services/", "/resolvers/", "/graphql/", "data-access",
+    "server.ts", "server.js", "server.py", "main.py", "app.py",
+    "controller.java", "Controller.java", "Handler.go",
+)
+_UI_PATH_HINTS = (
+    "/pages/", "/views/", "/components/", "/screens/", "/layouts/", "/templates/",
+    ".tsx", ".jsx", ".vue", ".svelte", ".html", ".css", ".scss",
+    "app.component.ts", "App.vue", "App.svelte",
+    "/styles/", "/assets/", "/public/",
+)
 
 
 def apply_surface_to_requirement_map(req_map: dict[str, Any], surface: str) -> dict[str, Any]:

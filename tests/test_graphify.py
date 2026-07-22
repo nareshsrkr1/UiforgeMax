@@ -20,7 +20,6 @@ def test_resolve_python_spec_accepts_full_path():
 
 
 def test_resolve_python_spec_accepts_command_name(monkeypatch):
-    # Simulate PATH lookup for a bare command without depending on the host PATH.
     fake = Path(sys.executable)
 
     def _which(cmd: str):
@@ -48,7 +47,7 @@ def test_graphify_python_honours_command_override(monkeypatch):
         graphify_python.cache_clear()
 
 
-def test_plan_queries_are_requirement_shaped_not_nx():
+def test_plan_queries_deterministic_fallback_is_stack_agnostic():
     reqs = {
         "summary": "Dark mode page background and sidebar",
         "acceptanceCriteria": [
@@ -62,11 +61,9 @@ def test_plan_queries_are_requirement_shaped_not_nx():
     questions = " ".join(q["question"] for q in plan["queries"]).lower()
     assert "datagrid" not in questions
     assert "listcustomers" not in questions
-    assert plan["intent"] == "theme_ui"
-    assert plan["strategy"] == "lexical_first"
-    assert plan["queryCount"] <= 1
+    assert plan["source"] == "deterministic_fallback"
+    assert plan["queryCount"] >= 1
     assert all(len(q["question"]) <= 72 for q in plan["queries"])
-    assert "dark" in questions or "nav" in questions or "css" in questions
     assert plan["engine"] == "graphify-cli"
 
 
@@ -86,7 +83,7 @@ def test_plan_queries_honours_mediation_short_questions():
     assert plan["focusFiles"] == ["src/styles.css", "src/App.tsx"]
 
 
-def test_plan_queries_adds_nx_flavor_only_when_stack_nx():
+def test_plan_queries_stack_flag_does_not_inject_hardcoded_queries():
     reqs = {
         "summary": "Add export button to dashboard page",
         "acceptanceCriteria": [{"id": "AC-1", "text": "Export button visible"}],
@@ -95,13 +92,12 @@ def test_plan_queries_adds_nx_flavor_only_when_stack_nx():
     }
     plain = plan_queries(reqs, None, classification={"surface": "ui_only"}, stack={"nx": False})
     nx = plan_queries(reqs, None, classification={"surface": "full_stack"}, stack={"nx": True})
-    assert not any(q["id"] == "Q-NX" for q in plain["queries"])
-    assert any(q["id"] == "Q-NX" for q in nx["queries"])
+    for q in plain["queries"] + nx["queries"]:
+        assert q["type"] == "keyword.query"
+        assert len(q["question"]) <= 72
 
 
 def test_requirement_map_drops_package_json_noise():
-    from uiforgemax.graphify.requirement_map import build_requirement_map
-
     reqs = {
         "issueKey": "SCRUM-5",
         "summary": "Dark mode",
@@ -176,9 +172,8 @@ def test_stage_query_plan_writes_queries(tmp_path: Path):
         "policy": {},
     }
     plan = stage_query_plan(run_dir, reqs)
-    assert plan["intent"] == "theme_ui"
-    assert plan["strategy"] == "lexical_first"
-    assert plan["queryCount"] <= 1
+    assert plan["source"] == "deterministic_fallback"
+    assert plan["queryCount"] >= 1
     assert (run_dir / "graph" / "queries.json").exists()
 
 

@@ -370,7 +370,22 @@ def build_plan_approval_package(run_dir: Path, plan: dict[str, Any] | None = Non
         }
     sot = plan.get("sourceOfTruth") or reqs.get("sourceOfTruth") or understanding.get("sourceOfTruth") or {}
     visual = plan.get("visualCompliance") or {}
-    return {
+
+    subtask_plan = plan.get("subtaskPlan")
+    subtask_summary: list[dict[str, Any]] = []
+    if subtask_plan:
+        for st in subtask_plan.get("subtasks", []):
+            subtask_summary.append({
+                "subtaskId": st.get("subtaskId"),
+                "title": st.get("title"),
+                "surfaceHint": st.get("surfaceHint"),
+                "linkedAcIds": st.get("linkedAcIds", []),
+                "dependencies": st.get("dependencies", []),
+                "complexity": st.get("complexity"),
+                "fileCount": len(st.get("modify", [])) + len(st.get("create", [])),
+            })
+
+    package = {
         "gate": 1,
         "title": "Plan approval — sole review before implement",
         "summary": plan.get("summary") or reqs.get("summary"),
@@ -412,6 +427,24 @@ def build_plan_approval_package(run_dir: Path, plan: dict[str, Any] | None = Non
             "is implemented — no second approval."
         ),
     }
+    if subtask_summary:
+        package["subtaskBreakdown"] = {
+            "strategy": subtask_plan.get("decompositionStrategy", "unknown"),
+            "subtaskCount": subtask_plan.get("subtaskCount", 0),
+            "dependencyOrder": subtask_plan.get("dependencyOrder", []),
+            "parallelGroups": subtask_plan.get("parallelGroups", []),
+            "subtasks": subtask_summary,
+        }
+        package["displayInstruction"] = (
+            "SOLE human gate before implement. Show: topology, scope, ACs, "
+            "SUB-TASK BREAKDOWN (strategy, dependency order, per-sub-task files and ACs), "
+            "files to create/modify, execution order, source-of-truth references "
+            "(HTML / wireframe / mockup / design notes under inputs/attachments/), "
+            "risks, blockers, unit tests to generate, coverage expectation, validation plan. "
+            "Then approve_plan or request_changes. After approve_plan the same locked plan "
+            "is implemented — no second approval."
+        )
+    return package
 
 
 def generate_plan(
@@ -421,6 +454,7 @@ def generate_plan(
     api_resolution: dict[str, Any],
     feedback: str | None = None,
 ) -> tuple[dict, dict]:
+    from uiforgemax.pipeline.decompose import load_subtasks
     from uiforgemax.pipeline.target_sanitize import sanitize_plan_targets, sanitize_requirement_map
 
     req_map = sanitize_requirement_map(dict(req_map))
@@ -463,6 +497,15 @@ def generate_plan(
         else [],
     }
 
+    subtasks = load_subtasks(run_dir)
+    subtask_plan = None
+    if subtasks and subtasks.get("subtaskCount", 0) > 1:
+        subtask_plan = _build_subtask_plan(
+            subtasks, req_map, create, modify,
+        )
+        create = _tag_actions_with_subtask(create, subtask_plan)
+        modify = _tag_actions_with_subtask(modify, subtask_plan)
+
     plan = {
         "source": req_map.get("source", "graph/requirement-map.json"),
         "issueKey": req_map.get("issueKey") or requirements.get("issueKey"),
@@ -471,7 +514,7 @@ def generate_plan(
         "reuse": req_map.get("reuse", []),
         "create": create,
         "modify": modify,
-        "executionOrder": req_map.get("executionOrder", []),
+        "executionOrder": _build_execution_order(req_map, subtask_plan),
         "acceptanceMappings": req_map.get("acceptanceMappings", []),
         "sourceOfTruth": sot,
         "visualCompliance": visual_compliance,
@@ -487,6 +530,8 @@ def generate_plan(
             "compliance": requirements.get("compliance", {}),
         },
     }
+    if subtask_plan:
+        plan["subtaskPlan"] = subtask_plan
     plan = sanitize_plan_targets(plan)
 
     (run_dir / "plans" / "implementation-plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
@@ -517,6 +562,96 @@ def generate_plan(
     approval = build_plan_approval_package(run_dir, plan)
     (run_dir / "plans" / "plan-approval.json").write_text(json.dumps(approval, indent=2), encoding="utf-8")
     return plan, review
+
+
+def _build_subtask_plan(
+    subtasks: dict[str, Any],
+    req_map: dict[str, Any],
+    create: list[dict[str, Any]],
+    modify: list[dict[str, Any]],
+) -> dict[str, Any]:
+    st_list = subtasks.get("subtasks", [])
+    dep_order = subtasks.get("dependencyOrder", [st["id"] for st in st_list])
+    parallel_groups = subtasks.get("parallelGroups", [])
+    req_map_subtasks = req_map.get("subtasks") or {}
+
+    ordered_subtasks: list[dict[str, Any]] = []
+    for st in st_list:
+        st_id = st["id"]
+        rm_section = req_map_subtasks.get(st_id, {})
+        st_create = rm_section.get("create", [])
+        st_modify = rm_section.get("modify", [])
+        st_evidence = rm_section.get("evidenceFiles", [])
+
+        ordered_subtasks.append({
+            "subtaskId": st_id,
+            "title": st.get("title", ""),
+            "summary": st.get("summary", ""),
+            "surfaceHint": st.get("surfaceHint", "unknown"),
+            "linkedAcIds": st.get("linkedAcIds", []),
+            "dependencies": st.get("dependencies", []),
+            "complexity": st.get("complexity", "medium"),
+            "order": st.get("order", 0),
+            "create": st_create,
+            "modify": st_modify,
+            "evidenceFiles": st_evidence,
+            "executionOrder": [m.get("path", "") for m in st_modify] + [c.get("path", "") for c in st_create],
+        })
+
+    return {
+        "version": 1,
+        "decompositionStrategy": subtasks.get("decompositionStrategy", "ac_grouping"),
+        "subtaskCount": len(st_list),
+        "subtasks": ordered_subtasks,
+        "dependencyOrder": dep_order,
+        "parallelGroups": parallel_groups,
+    }
+
+
+def _tag_actions_with_subtask(
+    actions: list[dict[str, Any]],
+    subtask_plan: dict[str, Any],
+) -> list[dict[str, Any]]:
+    path_to_subtask: dict[str, str] = {}
+    for st in subtask_plan.get("subtasks", []):
+        st_id = st["subtaskId"]
+        for item in st.get("modify", []) + st.get("create", []):
+            p = item.get("path", "")
+            if p:
+                path_to_subtask.setdefault(p, st_id)
+
+    for action in actions:
+        p = action.get("path", "")
+        if p in path_to_subtask and "subtaskId" not in action:
+            action["subtaskId"] = path_to_subtask[p]
+    return actions
+
+
+def _build_execution_order(
+    req_map: dict[str, Any],
+    subtask_plan: dict[str, Any] | None,
+) -> list[str]:
+    if not subtask_plan:
+        return req_map.get("executionOrder", [])
+
+    ordered: list[str] = []
+    dep_order = subtask_plan.get("dependencyOrder", [])
+    st_by_id = {st["subtaskId"]: st for st in subtask_plan.get("subtasks", [])}
+
+    for st_id in dep_order:
+        st = st_by_id.get(st_id)
+        if not st:
+            continue
+        for path in st.get("executionOrder", []):
+            if path and path not in ordered:
+                ordered.append(path)
+
+    flat = req_map.get("executionOrder", [])
+    for path in flat:
+        if path and path not in ordered:
+            ordered.append(path)
+
+    return ordered
 
 
 def _plan_markdown(plan: dict[str, Any]) -> str:
@@ -585,6 +720,7 @@ def _plan_markdown(plan: dict[str, Any]) -> str:
 ## Execution order
 {chr(10).join(f'{i+1}. `{p}`' for i, p in enumerate(plan.get('executionOrder') or [])) or '_None_'}
 
+{_subtask_plan_markdown(plan.get('subtaskPlan'))}
 ## Risks
 {chr(10).join(f'- {r}' for r in risks) or '_None_'}
 
@@ -607,3 +743,27 @@ def _plan_markdown(plan: dict[str, Any]) -> str:
 ### Unit / generated test paths
 {chr(10).join(f'- `{u}`' for u in (tests.get('unit') or [])) or '_None planned_'}
 """
+
+
+def _subtask_plan_markdown(subtask_plan: dict[str, Any] | None) -> str:
+    if not subtask_plan or not subtask_plan.get("subtasks"):
+        return ""
+    lines = [
+        f"## Sub-task decomposition (strategy: `{subtask_plan.get('decompositionStrategy', 'unknown')}`)",
+        f"- Sub-task count: {subtask_plan.get('subtaskCount', 0)}",
+        f"- Dependency order: {' → '.join(subtask_plan.get('dependencyOrder', []))}",
+        "",
+    ]
+    for st in subtask_plan.get("subtasks", []):
+        lines.append(f"### {st.get('subtaskId', '?')}: {st.get('title', '')}")
+        lines.append(f"- Surface: `{st.get('surfaceHint', 'unknown')}` · Complexity: `{st.get('complexity', '?')}`")
+        lines.append(f"- Linked ACs: {', '.join(st.get('linkedAcIds', []))}")
+        deps = st.get("dependencies", [])
+        if deps:
+            lines.append(f"- Depends on: {', '.join(deps)}")
+        for m in st.get("modify", []):
+            lines.append(f"  - modify: `{m.get('path', '')}`")
+        for c in st.get("create", []):
+            lines.append(f"  - create: `{c.get('path', '')}`")
+        lines.append("")
+    return "\n".join(lines)

@@ -65,8 +65,17 @@ def resolve_root(roots: dict[str, Path], action: dict[str, Any]) -> Path:
     return root
 
 
-def apply_plan(project_root: Path | dict[str, Path], plan: dict[str, Any]) -> dict[str, Any]:
+def apply_plan(
+    project_root: Path | dict[str, Path],
+    plan: dict[str, Any],
+    *,
+    subtasks: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     roots = _normalize_roots(project_root)
+
+    if subtasks and subtasks.get("subtaskCount", 0) > 1:
+        return _apply_plan_subtasked(roots, plan, subtasks)
+
     changed: list[str] = []
     skipped: list[dict[str, str]] = []
     branch = "uiforgemax/feature-run"
@@ -194,6 +203,192 @@ def apply_plan(project_root: Path | dict[str, Path], plan: dict[str, Any]) -> di
     }
 
 
+def _apply_plan_subtasked(
+    roots: dict[str, Path],
+    plan: dict[str, Any],
+    subtasks: dict[str, Any],
+) -> dict[str, Any]:
+    changed: list[str] = []
+    skipped: list[dict[str, str]] = []
+    subtask_results: dict[str, dict[str, Any]] = {}
+    branch = "uiforgemax/feature-run"
+
+    for root in {str(r) for r in roots.values()}:
+        try:
+            subprocess.run(
+                ["git", "checkout", "-b", branch],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            branch = None
+            break
+
+    templates = _build_template_map()
+    patches = _build_patch_map()
+    create_paths = {item["path"] for item in plan.get("create", []) if item.get("path")}
+    actions_by_path: dict[str, dict] = {}
+    for item in plan.get("create", []) + plan.get("modify", []):
+        if item.get("path"):
+            actions_by_path[item["path"]] = item
+
+    dep_order = subtasks.get("dependencyOrder", [st["id"] for st in subtasks.get("subtasks", [])])
+    st_by_id = {st["id"]: st for st in subtasks.get("subtasks", [])}
+    subtask_plan = plan.get("subtaskPlan") or {}
+    sp_by_id = {sp["subtaskId"]: sp for sp in subtask_plan.get("subtasks", [])}
+
+    for st_id in dep_order:
+        st = st_by_id.get(st_id, {})
+        sp = sp_by_id.get(st_id, {})
+        st_exec_order = sp.get("executionOrder", [])
+
+        if not st_exec_order:
+            for path, action in actions_by_path.items():
+                if action.get("subtaskId") == st_id and path not in st_exec_order:
+                    st_exec_order.append(path)
+
+        st_changed: list[str] = []
+        st_skipped: list[dict[str, str]] = []
+
+        for rel in st_exec_order:
+            action = actions_by_path.pop(rel, None)
+            if not action:
+                continue
+            root = resolve_root(roots, action)
+            target = root / rel
+            is_create = rel in create_paths or not target.exists()
+
+            try:
+                if action.get("content") is not None:
+                    content = str(action["content"])
+                elif action.get("templateId") and action["templateId"] in templates:
+                    content = templates[action["templateId"]](root, target)
+                elif action.get("patchId") and action["patchId"] in patches:
+                    content = patches[action["patchId"]](root, target)
+                elif is_create:
+                    content = _generic_create(action)
+                else:
+                    content = _generic_modify(action, target)
+            except Exception as exc:  # noqa: BLE001
+                st_skipped.append({"path": rel, "reason": str(exc)})
+                continue
+
+            if content is None:
+                st_skipped.append({"path": rel, "reason": "no writer produced content"})
+                continue
+
+            _write(target, content)
+            st_changed.append(rel)
+            try:
+                subprocess.run(["git", "add", rel], cwd=root, check=False)
+            except FileNotFoundError:
+                pass
+
+        if st_changed:
+            commit_root = resolve_root(roots, st_by_id.get(st_id, {}))
+            try:
+                subprocess.run(
+                    ["git", "commit", "-m", f"uiforgemax [{st_id}]: {st.get('title', st_id)}"],
+                    cwd=commit_root, capture_output=True, check=False,
+                )
+            except FileNotFoundError:
+                pass
+
+        changed.extend(st_changed)
+        skipped.extend(st_skipped)
+        subtask_results[st_id] = {
+            "filesChanged": st_changed,
+            "fileCount": len(st_changed),
+            "skipped": st_skipped,
+            "status": "completed" if not st_skipped else ("partial" if st_changed else "failed"),
+        }
+
+    remaining = [p for p in plan.get("executionOrder", []) if p in actions_by_path]
+    for rel in remaining:
+        action = actions_by_path.pop(rel, None)
+        if not action:
+            continue
+        root = resolve_root(roots, action)
+        target = root / rel
+        is_create = rel in create_paths or not target.exists()
+        try:
+            if action.get("content") is not None:
+                content = str(action["content"])
+            elif is_create:
+                content = _generic_create(action)
+            else:
+                content = _generic_modify(action, target)
+        except Exception as exc:  # noqa: BLE001
+            skipped.append({"path": rel, "reason": str(exc)})
+            continue
+        if content is None:
+            skipped.append({"path": rel, "reason": "no writer produced content"})
+            continue
+        _write(target, content)
+        changed.append(rel)
+        try:
+            subprocess.run(["git", "add", rel], cwd=root, check=False)
+            subprocess.run(
+                ["git", "commit", "-m", f"uiforgemax: {rel}"],
+                cwd=root, capture_output=True, check=False,
+            )
+        except FileNotFoundError:
+            pass
+
+    if changed and skipped:
+        skipped_summary = "; ".join(f"{s['path']} ({s['reason']})" for s in skipped)
+        raise PartialImplementError(
+            f"PARTIAL IMPLEMENT: {len(changed)} file(s) written but "
+            f"{len(skipped)} file(s) were skipped.\n"
+            f"Skipped: {skipped_summary}\n"
+            "PLAN_REFINEMENT mediation must supply 'content' for every create/modify "
+            "action — MCP does not invent product-specific code for files it has not "
+            "been given content for.  Re-run PLAN_REFINEMENT mediation with 'content' "
+            "fields for each skipped path, then uiforgemax_advance.",
+            changed=changed,
+            skipped=skipped,
+            branch=branch,
+        )
+
+    return {
+        "branch": branch,
+        "filesChanged": changed,
+        "fileCount": len(changed),
+        "skipped": skipped,
+        "source": plan.get("source"),
+        "roots": {name: str(p) for name, p in roots.items()},
+        "subtaskResults": subtask_results,
+    }
+
+
+def _build_template_map() -> dict[str, Any]:
+    return {
+        "api.export_route": _export_route,
+        "client.export_customers": _export_client,
+        "page.customer_list": _customer_list_page,
+        "test.customer_list": _customer_list_test,
+        "greenfield.backend_requirements": _gf_backend_requirements,
+        "greenfield.backend_init": _gf_empty,
+        "greenfield.backend_store": _gf_backend_store,
+        "greenfield.backend_main": _gf_backend_main,
+        "greenfield.backend_readme": _gf_backend_readme,
+        "greenfield.ui_index": _gf_ui_index,
+        "greenfield.ui_styles": _gf_ui_styles,
+        "greenfield.ui_serve": _gf_ui_serve,
+        "greenfield.ui_readme": _gf_ui_readme,
+        "greenfield.readme": _gf_readme,
+        "greenfield.start_ps1": _gf_start_ps1,
+    }
+
+
+def _build_patch_map() -> dict[str, Any]:
+    return {
+        "app.register_export": _patch_app,
+        "data_access.export": _patch_data_access,
+        "portal.app_routing": _patch_portal_app,
+        "portal.green_button": _patch_styles,
+    }
+
+
 # --- Generic writers (no product/demo assumptions) --------------------------------
 
 
@@ -211,18 +406,36 @@ def _generic_create(action: dict[str, Any]) -> str:
             f"  return <div data-testid=\"{Path(path).stem}\">{name}</div>;\n"
             f"}}\n"
         )
+    if suffix == ".vue":
+        name = _component_name(path)
+        return (
+            f"<template>\n  <div>{name}</div>\n</template>\n\n"
+            f"<script setup lang=\"ts\">\n// {purpose}\n</script>\n"
+        )
+    if suffix == ".svelte":
+        name = _component_name(path)
+        return f"<script lang=\"ts\">\n  // {purpose}\n</script>\n\n<div>{name}</div>\n"
     if suffix in {".ts", ".js"}:
         return f"// {purpose}\nexport {{}};\n"
     if suffix == ".css":
+        return f"/* {purpose} */\n"
+    if suffix in {".scss", ".sass", ".less"}:
         return f"/* {purpose} */\n"
     if suffix == ".py":
         return f'"""{purpose}"""\n'
     if suffix in {".java", ".kt"}:
         return f"// {purpose}\n"
     if suffix == ".go":
-        return f"package main\n\n// {purpose}\n"
+        pkg = Path(path).parent.name or "main"
+        return f"package {pkg}\n\n// {purpose}\n"
+    if suffix == ".rs":
+        return f"// {purpose}\n"
     if suffix == ".cs":
         return f"// {purpose}\n"
+    if suffix == ".rb":
+        return f"# {purpose}\n"
+    if suffix == ".php":
+        return f"<?php\n// {purpose}\n"
     if suffix == ".md":
         return f"# {Path(path).stem}\n\n{purpose}\n"
     if suffix == ".html":
@@ -536,24 +749,28 @@ def _gf_ui_index(_root: Path, _target: Path) -> str:
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div id="root"></div>
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <main class="shell">
+    <h1>Greenfield App</h1>
+    <ul id="items"></ul>
+  </main>
   <script>
     const API = "http://127.0.0.1:8000";
-    function App() {
-      const [items, setItems] = React.useState([]);
-      React.useEffect(() => {
-        fetch(API + "/api/items").then(r => r.json()).then(d => setItems(d.data || []));
-      }, []);
-      return React.createElement("main", { className: "shell" },
-        React.createElement("h1", null, "Greenfield App"),
-        React.createElement("ul", null, items.map(i =>
-          React.createElement("li", { key: i.id }, i.name + " — " + i.status)
-        ))
-      );
+    async function loadItems() {
+      try {
+        const res = await fetch(API + "/api/items");
+        const data = await res.json();
+        const ul = document.getElementById("items");
+        ul.innerHTML = "";
+        for (const item of data.data || []) {
+          const li = document.createElement("li");
+          li.textContent = item.name + " \\u2014 " + item.status;
+          ul.appendChild(li);
+        }
+      } catch (e) {
+        console.error("Failed to load items:", e);
+      }
     }
-    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+    loadItems();
   </script>
 </body>
 </html>

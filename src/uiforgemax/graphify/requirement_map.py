@@ -13,6 +13,7 @@ def build_requirement_map(
     visual_spec: dict[str, Any] | None,
     *,
     classification: dict[str, Any] | None = None,
+    subtasks: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     classification = classification or {}
     surface = classification.get("surface") or requirements.get("surface") or "unknown"
@@ -52,15 +53,24 @@ def build_requirement_map(
             }
         )
 
+    # Build AC→subtask lookup for subtask-aware matching
+    _ac_to_subtask: dict[str, str] = {}
+    if subtasks:
+        for st in subtasks.get("subtasks", []):
+            for ac_id in st.get("linkedAcIds") or []:
+                _ac_to_subtask[ac_id] = st["id"]
+
     ac_mappings = []
     for i, ac in enumerate(requirements.get("acceptanceCriteria") or []):
         ac_id = ac.get("id", f"AC-{i + 1}") if isinstance(ac, dict) else f"AC-{i + 1}"
         text = (ac.get("text") if isinstance(ac, dict) else str(ac)) or ""
+        st_id = _ac_to_subtask.get(ac_id)
         related_q = next(
             (
                 r
                 for r in results
-                if (r.get("params") or {}).get("acId") == ac_id
+                if (r.get("params") or {}).get("subtaskId") == st_id and st_id
+                or (r.get("params") or {}).get("acId") == ac_id
                 or (text and text[:40].lower() in (r.get("question") or "").lower())
             ),
             None,
@@ -152,7 +162,52 @@ def build_requirement_map(
             "rawEvidenceFileCount": len(raw_evidence),
         },
     }
+    if subtasks and subtasks.get("subtaskCount", 0) > 1:
+        req_map["subtasks"] = _group_by_subtask(
+            subtasks, results, ac_mappings, evidence_files,
+        )
+
     return sanitize_requirement_map(req_map)
+
+
+def _group_by_subtask(
+    subtasks: dict[str, Any],
+    results: list[dict[str, Any]],
+    ac_mappings: list[dict[str, Any]],
+    all_evidence_files: list[str],
+) -> dict[str, dict[str, Any]]:
+    ac_by_id = {m["acId"]: m for m in ac_mappings}
+    grouped: dict[str, dict[str, Any]] = {}
+
+    for st in subtasks.get("subtasks", []):
+        st_id = st["id"]
+        linked_ac_ids = set(st.get("linkedAcIds") or [])
+
+        st_results = [
+            r for r in results
+            if (r.get("params") or {}).get("subtaskId") == st_id
+        ]
+        st_files = filter_impl_paths(sorted(
+            {n.get("source_file") for r in st_results for n in (r.get("nodes") or []) if n.get("source_file")}
+        ))
+
+        st_acs = [ac_by_id[ac_id] for ac_id in linked_ac_ids if ac_id in ac_by_id]
+
+        grouped[st_id] = {
+            "subtaskId": st_id,
+            "title": st.get("title", ""),
+            "linkedAcIds": sorted(linked_ac_ids),
+            "acceptanceMappings": st_acs,
+            "modify": [
+                {"path": f, "purpose": "graph evidence", "source": "graphify-query"}
+                for f in st_files
+            ],
+            "create": [],
+            "reuse": [{"kind": "file", "path": f} for f in st_files],
+            "evidenceFiles": st_files,
+        }
+
+    return grouped
 
 
 def _collect_files(results: list[dict[str, Any]]) -> list[str]:

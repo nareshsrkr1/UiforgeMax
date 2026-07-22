@@ -9,13 +9,17 @@ from pathlib import Path
 from uiforgemax.config import Config, JiraConfig
 from uiforgemax.intake_hints import extract_leading_issue_key, normalize_issue_key
 from uiforgemax.state.gates import GateError
-from uiforgemax.tools import ToolContext, approvals, inputs, lifecycle
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-PLATFORM = REPO_ROOT / "platform"
+from uiforgemax.tools import ToolContext, approvals, inputs, lifecycle, preflight
 
 
-def _ctx(monkeypatch, *, jira: bool = False) -> ToolContext:
+def _make_project(tmp_path: Path) -> Path:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "main.py").write_text('"""App."""\n')
+    return project
+
+
+def _ctx(monkeypatch, tmp_path: Path, *, jira: bool = False) -> tuple[ToolContext, Path]:
     runs = tempfile.mkdtemp()
     if jira:
         monkeypatch.setenv("JIRA_BASE_URL", "https://example.atlassian.net")
@@ -33,7 +37,10 @@ def _ctx(monkeypatch, *, jira: bool = False) -> ToolContext:
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
         cfg = Config(runs_root=runs)
     monkeypatch.setenv("UIFORGEMAX_USE_FIXTURES", "1")
-    return ToolContext.from_config(cfg)
+    ctx = ToolContext.from_config(cfg)
+    project = _make_project(tmp_path)
+    preflight.preflight(ctx, project_root=str(project))
+    return ctx, project
 
 
 def test_extract_leading_issue_key():
@@ -44,34 +51,34 @@ def test_extract_leading_issue_key():
     assert normalize_issue_key("scrum-5") == "SCRUM-5"
 
 
-def test_start_run_without_jira_prefers_prompt(monkeypatch):
-    ctx = _ctx(monkeypatch, jira=False)
-    data = json.loads(lifecycle.start_run(ctx, project_root=str(PLATFORM)))
+def test_start_run_without_jira_prefers_prompt(monkeypatch, tmp_path):
+    ctx, project = _ctx(monkeypatch, tmp_path, jira=False)
+    data = json.loads(lifecycle.start_run(ctx, project_root=str(project)))
     assert data["nextTool"] == "uiforgemax_add_prompt"
     assert "uiforgemax_add_jira" in data["alternatives"]
 
 
-def test_start_run_with_jira_prefers_add_jira(monkeypatch):
-    ctx = _ctx(monkeypatch, jira=True)
-    data = json.loads(lifecycle.start_run(ctx, project_root=str(PLATFORM)))
+def test_start_run_with_jira_prefers_add_jira(monkeypatch, tmp_path):
+    ctx, project = _ctx(monkeypatch, tmp_path, jira=True)
+    data = json.loads(lifecycle.start_run(ctx, project_root=str(project)))
     assert data["nextTool"] == "uiforgemax_add_jira"
     assert "uiforgemax_add_prompt" in data["alternatives"]
     assert data["jiraConfigured"] is True
 
 
-def test_start_run_issue_key_sets_pending_and_next_tool(monkeypatch):
-    ctx = _ctx(monkeypatch, jira=False)
+def test_start_run_issue_key_sets_pending_and_next_tool(monkeypatch, tmp_path):
+    ctx, project = _ctx(monkeypatch, tmp_path, jira=False)
     data = json.loads(
-        lifecycle.start_run(ctx, project_root=str(PLATFORM), issue_key="SCRUM-5")
+        lifecycle.start_run(ctx, project_root=str(project), issue_key="SCRUM-5")
     )
     assert data["nextTool"] == "uiforgemax_add_jira"
     assert data["suggestedIssueKey"] == "SCRUM-5"
     assert "add_jira" in data["message"]
 
 
-def test_add_prompt_blocked_when_starts_with_key_and_jira_configured(monkeypatch):
-    ctx = _ctx(monkeypatch, jira=True)
-    run_id = json.loads(lifecycle.start_run(ctx, project_root=str(PLATFORM)))["runId"]
+def test_add_prompt_blocked_when_starts_with_key_and_jira_configured(monkeypatch, tmp_path):
+    ctx, project = _ctx(monkeypatch, tmp_path, jira=True)
+    run_id = json.loads(lifecycle.start_run(ctx, project_root=str(project)))["runId"]
     out = json.loads(
         inputs.add_prompt(
             ctx,
@@ -85,17 +92,17 @@ def test_add_prompt_blocked_when_starts_with_key_and_jira_configured(monkeypatch
     assert not (ctx.store.run_dir(run_id) / "inputs" / "prompt.txt").exists()
 
 
-def test_add_prompt_allowed_without_jira_env(monkeypatch):
-    ctx = _ctx(monkeypatch, jira=False)
-    run_id = json.loads(lifecycle.start_run(ctx, project_root=str(PLATFORM)))["runId"]
+def test_add_prompt_allowed_without_jira_env(monkeypatch, tmp_path):
+    ctx, project = _ctx(monkeypatch, tmp_path, jira=False)
+    run_id = json.loads(lifecycle.start_run(ctx, project_root=str(project)))["runId"]
     out = json.loads(inputs.add_prompt(ctx, run_id, "SCRUM-5: free text when no jira"))
     assert out["stop"] is False
     assert (ctx.store.run_dir(run_id) / "inputs" / "prompt.txt").exists()
 
 
-def test_approve_plan_too_early_message(monkeypatch):
-    ctx = _ctx(monkeypatch, jira=False)
-    run_id = json.loads(lifecycle.start_run(ctx, project_root=str(PLATFORM)))["runId"]
+def test_approve_plan_too_early_message(monkeypatch, tmp_path):
+    ctx, project = _ctx(monkeypatch, tmp_path, jira=False)
+    run_id = json.loads(lifecycle.start_run(ctx, project_root=str(project)))["runId"]
     try:
         approvals.approve_plan(ctx, run_id)
         raise AssertionError("expected GateError")

@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -248,10 +249,26 @@ def js_deps_ready(workspace: Path, *, need_packages: list[str] | None = None) ->
 
 def runner_packages_for_stack(stack: dict[str, Any] | None) -> list[str]:
     fw = str((stack or {}).get("testFramework") or "").lower()
-    if "vitest" in fw:
-        return ["vitest"]
-    if "jest" in fw:
-        return ["jest"]
+    _KNOWN = {
+        "vitest": ["vitest"],
+        "jest": ["jest"],
+        "mocha": ["mocha"],
+        "jasmine": ["jasmine"],
+        "pytest": [],
+        "unittest": [],
+        "junit": [],
+        "testng": [],
+        "xunit": [],
+        "nunit": [],
+        "go test": [],
+        "cargo test": [],
+        "rspec": ["rspec"],
+        "minitest": [],
+        "phpunit": ["phpunit"],
+    }
+    for name, pkgs in _KNOWN.items():
+        if name in fw:
+            return pkgs
     return []
 
 
@@ -392,10 +409,11 @@ def collect_toolchain_facts(
             "run[] must use a runner that exists after install (npm exec vitest, or node runnerPath).",
             "Never claim node_modules is ready when runnerAtInstallRoot is false.",
             "If hoistedRunner is true, do NOT run node ./node_modules/<runner> under the app cwd.",
-            "For Node/React UI tickets: include Testing Library DOM tests AND Playwright e2e when "
-            "visual/dark-mode ACs need real UI proof. Mark Playwright run[] with suite='playwright' "
-            "(optional). MCP tries one project-local install; if Playwright stays unavailable, "
-            "those commands are soft-skipped with tests/playwright-status.json — unit/DOM still decide pass.",
+            "For UI tickets with visual ACs: include appropriate DOM/component tests for the detected "
+            "framework (Testing Library for React, ComponentFixture for Angular, @vue/test-utils for Vue, "
+            "etc.) AND Playwright e2e when visual proof is needed. Mark Playwright run[] with "
+            "suite='playwright' (optional). MCP tries one project-local install; if Playwright stays "
+            "unavailable, those commands are soft-skipped — unit/DOM still decide pass.",
         ],
     }
 
@@ -551,6 +569,87 @@ def rewrite_js_command(cmd: str) -> str:
 
 def _tool_install_allowed() -> bool:
     return os.environ.get("UIFORGEMAX_ALLOW_TOOL_INSTALL", "").lower() in ("1", "true", "yes")
+
+
+def _auto_install_enabled() -> bool:
+    return os.environ.get("UIFORGEMAX_AUTO_INSTALL", "1").lower() not in ("0", "false", "no")
+
+
+SAFE_INSTALL_COMMANDS = {
+    "npm install",
+    "npm ci",
+    "npm install -D @playwright/test",
+    "npx playwright install chromium",
+    "npm exec -- playwright install chromium",
+    "poetry install",
+    "pip install -r requirements.txt",
+    "pnpm install",
+    "yarn install",
+}
+
+
+@dataclass
+class ToolStatus:
+    available: bool
+    installed_now: bool = False
+    skipped: bool = False
+    error: str | None = None
+    details: dict[str, Any] | None = None
+
+
+def smart_ensure_tool(
+    tool_name: str,
+    check_cmd: str,
+    install_cmd: str | None,
+    *,
+    cwd: Path,
+    timeout: int = 120,
+    required: bool = False,
+) -> ToolStatus:
+    check = run_with_timeout(check_cmd, cwd=cwd, timeout=min(timeout, 30))
+    if check.returncode == 0 and not check.timed_out:
+        return ToolStatus(available=True, details={"check": check_cmd, "output": _snip(check.stdout)})
+
+    if not _auto_install_enabled():
+        msg = f"{tool_name} not found; auto-install disabled (UIFORGEMAX_AUTO_INSTALL=0)"
+        if required:
+            return ToolStatus(available=False, error=msg)
+        return ToolStatus(available=False, skipped=True, error=msg)
+
+    if install_cmd is None:
+        msg = f"{tool_name} not found and no install command provided"
+        if required:
+            return ToolStatus(available=False, error=msg)
+        return ToolStatus(available=False, skipped=True, error=msg)
+
+    base_cmd = re.sub(r'^"[^"]*"\s*', '', install_cmd).strip()
+    if not any(base_cmd.startswith(safe) for safe in SAFE_INSTALL_COMMANDS):
+        msg = f"Install command not in allowlist: {base_cmd}"
+        if required:
+            return ToolStatus(available=False, error=msg)
+        return ToolStatus(available=False, skipped=True, error=msg)
+
+    result = run_with_timeout(install_cmd, cwd=cwd, timeout=timeout, env=subprocess_env())
+    if result.timed_out:
+        msg = f"{tool_name} install timed out after {timeout}s"
+        if required:
+            return ToolStatus(available=False, error=msg, details={"install": install_cmd, "timedOut": True})
+        return ToolStatus(available=False, skipped=True, error=msg)
+
+    if result.returncode != 0:
+        msg = f"{tool_name} install failed (exit {result.returncode})"
+        if required:
+            return ToolStatus(available=False, error=msg, details={"output": _snip(result.stderr)})
+        return ToolStatus(available=False, skipped=True, error=msg)
+
+    recheck = run_with_timeout(check_cmd, cwd=cwd, timeout=min(timeout, 30))
+    if recheck.returncode == 0 and not recheck.timed_out:
+        return ToolStatus(available=True, installed_now=True, details={"install": install_cmd})
+
+    msg = f"{tool_name} installed but re-check failed"
+    if required:
+        return ToolStatus(available=False, error=msg)
+    return ToolStatus(available=False, skipped=True, error=msg)
 
 
 def ensure_node_runtime() -> dict[str, Any]:

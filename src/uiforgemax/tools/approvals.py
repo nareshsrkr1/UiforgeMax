@@ -96,13 +96,18 @@ def approve_plan(ctx: ToolContext, run_id: str, by: str = "user") -> str:
     )
 
 
-def request_changes(ctx: ToolContext, run_id: str, feedback: str) -> str:
+def request_changes(
+    ctx: ToolContext,
+    run_id: str,
+    feedback: str,
+    *,
+    subtask_ids: list[str] | None = None,
+) -> str:
     state = ctx.store.load(run_id)
     status = state.status
     run_dir = ctx.store.run_dir(run_id)
 
     if status in (Status.UNDERSTANDING_READY, Status.AWAITING_UNDERSTANDING_APPROVAL):
-        # Fold into plan/normalize path — no separate understanding gate.
         state.approvals.understanding.feedback = feedback
         state.approvals.understanding.approved = False
         state.current_stage = Stage.NORMALIZE
@@ -110,13 +115,23 @@ def request_changes(ctx: ToolContext, run_id: str, feedback: str) -> str:
         clear_mediation_responses(run_dir)
         target = "normalize (delta merge)"
     elif status in (Status.PLAN_READY, Status.PLAN_REVIEWED, Status.AWAITING_PLAN_APPROVAL):
-        state.approvals.plan.feedback = feedback
+        if subtask_ids:
+            structured = json.dumps({
+                "type": "subtask_delta",
+                "subtaskIds": subtask_ids,
+                "feedback": feedback,
+            })
+            state.approvals.plan.feedback = structured
+        else:
+            state.approvals.plan.feedback = feedback
         state.approvals.plan.approved = False
         _clear_approved_plan(run_dir)
         state.current_stage = Stage.PLAN
         state.status = Status.PLAN_READY
         clear_mediation_responses(run_dir)
         target = "plan (delta revise)"
+        if subtask_ids:
+            target += f" [subtasks: {', '.join(subtask_ids)}]"
     else:
         return tool_response(
             state,

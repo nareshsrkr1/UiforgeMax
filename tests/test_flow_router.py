@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -12,9 +11,6 @@ from uiforgemax.config import Config
 from uiforgemax.pipeline.flow_router import build_flow_plan, is_stage_active, load_flow
 from uiforgemax.state import Stage, Status
 from uiforgemax.tools import ToolContext, approvals, inputs, lifecycle, pipeline, preflight
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-PLATFORM = REPO_ROOT / "platform"
 
 
 def _ctx() -> ToolContext:
@@ -26,6 +22,13 @@ def _ctx() -> ToolContext:
 
 def _parse_run_id(response: str) -> str:
     return json.loads(response)["runId"]
+
+
+def _make_project(tmp_path: Path) -> Path:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "main.py").write_text('"""App."""\n')
+    return project
 
 
 def test_flow_plan_ui_only_skips_api():
@@ -61,8 +64,9 @@ def test_greenfield_e2e_scaffold(tmp_path):
     ctx = _ctx()
     empty = tmp_path / "greenfield-app"
     empty.mkdir()
+    preflight.preflight(ctx, project_root=str(empty))
     run_id = _parse_run_id(lifecycle.start_run(ctx, project_root=str(empty)))
-    inputs.add_prompt(ctx, run_id, "Build a greenfield customer app from scratch with API and UI")
+    inputs.add_prompt(ctx, run_id, "Build a greenfield app from scratch with API and UI")
 
     pipeline.advance(ctx, run_id)
     state = ctx.store.load(run_id)
@@ -88,12 +92,12 @@ def test_greenfield_e2e_scaffold(tmp_path):
 
 def test_ui_only_skips_api_stages(tmp_path):
     ctx = _ctx()
-    workspace = Path(tempfile.mkdtemp()) / "platform"
-    shutil.copytree(PLATFORM, workspace, ignore=shutil.ignore_patterns("node_modules", "dist"))
-    run_id = _parse_run_id(lifecycle.start_run(ctx, project_root=str(workspace)))
+    project = _make_project(tmp_path)
+    preflight.preflight(ctx, project_root=str(project))
+    run_id = _parse_run_id(lifecycle.start_run(ctx, project_root=str(project)))
     img = tmp_path / "wire.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\n")
-    inputs.add_prompt(ctx, run_id, "Update customer portal page styling only — UI changes")
+    inputs.add_prompt(ctx, run_id, "Update page styling only — UI changes")
     inputs.add_image(ctx, run_id, str(img), role="wireframe")
 
     pipeline.advance(ctx, run_id)

@@ -13,47 +13,49 @@ from typing import Any
 # Metadata / tooling — never treat as implementation touch-points.
 _NON_IMPL_NAMES = frozenset(
     {
-        "package.json",
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "project.json",
-        "nx.json",
-        "workspace.json",
-        "tsconfig.json",
-        "tsconfig.base.json",
-        "tsconfig.app.json",
-        "tsconfig.spec.json",
-        "jsconfig.json",
-        "vite.config.ts",
-        "vite.config.js",
-        "vite.config.mts",
-        "jest.config.ts",
-        "jest.config.js",
-        "eslint.config.js",
-        "eslint.config.mjs",
-        ".eslintrc.json",
-        ".gitignore",
-        "readme.md",
-        "readme",
-        "license",
-        "license.md",
+        # JS/TS ecosystem
+        "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+        "project.json", "nx.json", "workspace.json",
+        "tsconfig.json", "tsconfig.base.json", "tsconfig.app.json", "tsconfig.spec.json",
+        "jsconfig.json", "angular.json",
+        "vite.config.ts", "vite.config.js", "vite.config.mts",
+        "next.config.js", "next.config.mjs", "nuxt.config.ts", "nuxt.config.js",
+        "webpack.config.js", "webpack.config.ts",
+        "jest.config.ts", "jest.config.js", "vitest.config.ts",
+        "eslint.config.js", "eslint.config.mjs", ".eslintrc.json",
+        "svelte.config.js", "tailwind.config.js", "tailwind.config.ts",
+        "postcss.config.js", "postcss.config.cjs",
+        # Python
+        "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
+        "poetry.lock", "pipfile", "pipfile.lock",
+        # Java/Kotlin
+        "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
+        "gradle.properties", "gradlew", "gradlew.bat",
+        # Go
+        "go.mod", "go.sum",
+        # Rust
+        "cargo.toml", "cargo.lock",
+        # .NET
+        "*.csproj", "*.sln", "nuget.config",
+        # Ruby
+        "gemfile", "gemfile.lock", "rakefile",
+        # PHP
+        "composer.json", "composer.lock",
+        # General
+        ".gitignore", ".editorconfig", ".prettierrc", ".prettierrc.json",
+        "dockerfile", "docker-compose.yml", "docker-compose.yaml",
+        "makefile", "cmakelists.txt",
+        "readme.md", "readme", "readme.txt",
+        "license", "license.md", "license.txt",
+        "changelog.md", "contributing.md",
     }
 )
 
 _IMPL_SUFFIXES = (
-    ".tsx",
-    ".ts",
-    ".jsx",
-    ".js",
-    ".css",
-    ".scss",
-    ".sass",
-    ".less",
-    ".html",
-    ".vue",
-    ".svelte",
-    ".py",
+    ".tsx", ".ts", ".jsx", ".js",
+    ".css", ".scss", ".sass", ".less",
+    ".html", ".vue", ".svelte",
+    ".py", ".go", ".rs", ".java", ".kt", ".cs", ".rb", ".php",
 )
 
 
@@ -114,7 +116,7 @@ def sanitize_requirement_map(req_map: dict[str, Any]) -> dict[str, Any]:
             # Keep mediated strategies; otherwise mark for plan refinement.
             if "package.json" in (m.get("strategy") or "") or "project.json" in (m.get("strategy") or ""):
                 m["strategy"] = (
-                    "Use nearest implementation evidence (App/styles/pages); "
+                    "Use nearest implementation evidence; "
                     "config files excluded automatically."
                 )
 
@@ -122,7 +124,13 @@ def sanitize_requirement_map(req_map: dict[str, Any]) -> dict[str, Any]:
     for r in reuse:
         path = r.get("path") or ""
         name = PurePosixPath(path.replace("\\", "/")).name.lower()
-        if path and path not in modify_paths and name in {"app.tsx", "app.jsx", "styles.css", "index.html"}:
+        if path and path not in modify_paths and name in {
+            "app.tsx", "app.jsx", "app.vue", "app.svelte",
+            "app.component.ts", "app.module.ts",
+            "main.py", "app.py", "main.go", "main.rs",
+            "application.java", "program.cs",
+            "styles.css", "index.html", "index.ts", "index.js",
+        }:
             modify.append(
                 {
                     "path": path,

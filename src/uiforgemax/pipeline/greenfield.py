@@ -110,7 +110,7 @@ def build_greenfield_requirement_map(
     if surface in ("full_stack", "ui_only", "unknown"):
         create.extend(
             [
-                {"path": "ui/index.html", "purpose": "React CRUD UI", "templateId": "greenfield.ui_index"},
+                {"path": "ui/index.html", "purpose": "CRUD UI entry point", "templateId": "greenfield.ui_index"},
                 {"path": "ui/styles.css", "purpose": "UI styles", "templateId": "greenfield.ui_styles"},
                 {"path": "ui/serve.py", "purpose": "Static UI server", "templateId": "greenfield.ui_serve"},
                 {"path": "ui/README.md", "purpose": "UI docs", "templateId": "greenfield.ui_readme"},

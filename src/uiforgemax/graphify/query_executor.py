@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -64,18 +65,53 @@ def execute_queries(
     max_nl = int(os.environ.get("UIFORGEMAX_GRAPHIFY_MAX_QUERIES", "2"))
     queries = queries[:max_nl]
 
-    # Short keyword probes only — default 20s (was 25–40 with long NL).
-    query_timeout = int(os.environ.get("UIFORGEMAX_GRAPHIFY_QUERY_TIMEOUT", "20"))
+    # Short keyword probes only. Standalone (interactive shell) these return in
+    # ~1s, but consistently hit a hard wall around 20s when spawned from a
+    # live MCP stdio session under Cursor — matches Windows Efficiency Mode /
+    # Power Throttling deprioritizing child processes of a backgrounded IDE
+    # host. Default raised to give real sessions headroom; override via env.
+    query_timeout = int(os.environ.get("UIFORGEMAX_GRAPHIFY_QUERY_TIMEOUT", "35"))
     timed_out = 0
+
+    # Run all NL queries in parallel across all roots.
+    def _run_single(q_entry: dict, root_name: str, graph_path: Path) -> tuple[str, str, dict]:
+        question = (q_entry.get("question") or "")[:72]
+        answer = run_query(question, graph_path, timeout=query_timeout, budget=600)
+        return q_entry.get("id", ""), root_name, {"root": root_name, **answer}
+
+    # Build work items: (query, root) pairs.
+    work: list[tuple[dict, str, Path]] = []
+    for q in queries:
+        question = (q.get("question") or "")[:72]
+        if not question.strip():
+            continue
+        for name, graph_path in roots:
+            work.append((q, name, graph_path))
+
+    # Execute in parallel (capped at 4 workers to avoid subprocess storms).
+    per_query_roots: dict[str, list[dict[str, Any]]] = {}
+    max_workers = min(len(work), int(os.environ.get("UIFORGEMAX_QUERY_WORKERS", "4")))
+    if work:
+        with ThreadPoolExecutor(max_workers=max(max_workers, 1)) as pool:
+            futures = {
+                pool.submit(_run_single, q, rn, gp): q
+                for q, rn, gp in work
+            }
+            for future in as_completed(futures):
+                q_entry = futures[future]
+                qid = q_entry.get("id", "")
+                try:
+                    _, _, answer = future.result()
+                except Exception:  # noqa: BLE001
+                    answer = {"root": "?", "status": "error", "answerText": "", "nodes": []}
+                per_query_roots.setdefault(qid, []).append(answer)
 
     for q in queries:
         question = (q.get("question") or "")[:72]
         if not question.strip():
             continue
-        per_root: list[dict[str, Any]] = []
-        for name, graph_path in roots:
-            answer = run_query(question, graph_path, timeout=query_timeout, budget=600)
-            per_root.append({"root": name, **answer})
+        qid = q.get("id", "")
+        per_root = per_query_roots.get(qid, [])
 
         best = next((a for a in per_root if a.get("status") == "ok" and a.get("nodes")), None)
         if best is None:
@@ -91,7 +127,7 @@ def execute_queries(
 
         results.append(
             {
-                "id": q.get("id"),
+                "id": qid,
                 "type": q.get("type", "keyword.query"),
                 "question": question,
                 "reason": q.get("reason"),

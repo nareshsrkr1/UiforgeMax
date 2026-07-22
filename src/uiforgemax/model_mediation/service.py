@@ -116,18 +116,30 @@ def mediation_pause_result(
 def apply_mediation(run_dir: Path, kind: MediationKind, payload: dict[str, Any]) -> None:
     if kind == MediationKind.REQUEST_CLASSIFICATION:
         _merge_classification(run_dir, payload)
+    elif kind == MediationKind.INTAKE_RECONCILIATION:
+        _merge_intake_reconciliation(run_dir, payload)
     elif kind == MediationKind.REQUIREMENT_ANALYSIS:
         _merge_requirements(run_dir, payload)
     elif kind == MediationKind.VISUAL_INTERPRETATION:
         _merge_visual(run_dir, payload)
     elif kind == MediationKind.GRAPH_EXPLAIN:
         _merge_graph_explain(run_dir, payload)
+    elif kind == MediationKind.QUERY_STRATEGY:
+        _merge_query_strategy(run_dir, payload)
+    elif kind == MediationKind.REQ_MAP_VALIDATION:
+        _merge_req_map_validation(run_dir, payload)
     elif kind == MediationKind.PLAN_REFINEMENT:
         _merge_plan(run_dir, payload)
     elif kind == MediationKind.TEST_GENERATION:
         _merge_tests(run_dir, payload)
     elif kind == MediationKind.TEST_ENV_RECOVERY:
         _merge_test_env_recovery(run_dir, payload)
+    elif kind == MediationKind.TASK_DECOMPOSITION:
+        _merge_task_decomposition(run_dir, payload)
+    elif kind == MediationKind.VISUAL_VALIDATION:
+        _merge_visual_validation(run_dir, payload)
+    elif kind == MediationKind.POST_IMPLEMENT_REVIEW:
+        _merge_post_implement_review(run_dir, payload)
 
 
 def _merge_test_env_recovery(run_dir: Path, payload: dict[str, Any]) -> None:
@@ -185,9 +197,25 @@ def _merge_requirements(run_dir: Path, payload: dict[str, Any]) -> None:
         req["acceptanceCriteria"] = payload["acceptanceCriteria"]
     if "dataNeeds" in payload:
         req["dataNeeds"] = payload.get("dataNeeds") or []
-    if payload.get("graphSearchHints"):
+    if payload.get("graphSearchStrategy"):
+        strategy = payload["graphSearchStrategy"]
+        shorts = []
+        for sq in strategy.get("searchQueries") or []:
+            s = " ".join(str(sq).split())[:72]
+            if s:
+                shorts.append(s)
+        req["graphSearchStrategy"] = {
+            "intent": strategy.get("intent"),
+            "filePatterns": list(strategy.get("filePatterns") or [])[:10],
+            "componentNames": list(strategy.get("componentNames") or [])[:15],
+            "perAcSearch": list(strategy.get("perAcSearch") or [])[:20],
+            "architecturalPatterns": list(strategy.get("architecturalPatterns") or [])[:10],
+            "keywords": list(strategy.get("keywords") or [])[:12],
+            "focusFiles": list(strategy.get("focusFiles") or [])[:8],
+            "searchQueries": shorts[:3],
+        }
+    elif payload.get("graphSearchHints"):
         hints = payload["graphSearchHints"]
-        # Normalize shortQuestions to ultra-short keyword bags.
         shorts = []
         for sq in hints.get("shortQuestions") or []:
             s = " ".join(str(sq).split())[:72]
@@ -368,3 +396,94 @@ def _merge_plan(run_dir: Path, payload: dict[str, Any]) -> None:
 
 def _merge_tests(run_dir: Path, payload: dict[str, Any]) -> None:
     _write_json(run_dir / "tests" / "generated-tests.json", payload)
+
+
+def _merge_task_decomposition(run_dir: Path, payload: dict[str, Any]) -> None:
+    from uiforgemax.pipeline.decompose import build_subtasks_from_mediation
+
+    reqs_path = run_dir / "requirements.normalized.json"
+    reqs = _load_json(reqs_path) if reqs_path.exists() else {}
+    cls_path = run_dir / "request-classification.json"
+    cls = _load_json(cls_path) if cls_path.exists() else {}
+    vis_path = run_dir / "visual-spec.json"
+    vis = _load_json(vis_path) if vis_path.exists() else None
+
+    subtasks = build_subtasks_from_mediation(reqs, cls, vis, payload)
+    _write_json(run_dir / "plans" / "subtasks.json", subtasks)
+
+
+def _merge_visual_validation(run_dir: Path, payload: dict[str, Any]) -> None:
+    _write_json(run_dir / "implementation" / "visual-validation.json", payload)
+
+
+def _merge_query_strategy(run_dir: Path, payload: dict[str, Any]) -> None:
+    """Persist IDE-decided query strategy for the query planner to consume."""
+    graph_dir = run_dir / "graph"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(graph_dir / "query-strategy.json", payload)
+
+
+def _merge_intake_reconciliation(run_dir: Path, payload: dict[str, Any]) -> None:
+    """Persist reconciled intake and fold overrides into normalized requirements."""
+    _write_json(run_dir / "intake-reconciliation.json", payload)
+    req_path = run_dir / "requirements.normalized.json"
+    if not req_path.exists():
+        return
+    req = _load_json(req_path)
+    if payload.get("reconciledSummary"):
+        req["reconciledSummary"] = payload["reconciledSummary"]
+    if payload.get("overrides"):
+        req["intakeOverrides"] = payload["overrides"]
+    if payload.get("contradictions"):
+        existing = req.get("conflicts") or []
+        for c in payload["contradictions"]:
+            if not c.get("resolved"):
+                existing.append(f"UNRESOLVED: {c.get('field')} — {c.get('sources')}")
+        req["conflicts"] = existing
+    if payload.get("needsHumanClarification"):
+        req.setdefault("clarifications", []).extend(
+            {"question": item["question"], "context": item.get("context", "")}
+            for item in payload["needsHumanClarification"]
+        )
+    req["intakeReconciled"] = True
+    _write_json(req_path, req)
+
+
+def _merge_req_map_validation(run_dir: Path, payload: dict[str, Any]) -> None:
+    """Apply requirement-map coverage validation adjustments."""
+    from uiforgemax.pipeline.target_sanitize import is_implementation_path
+
+    _write_json(run_dir / "graph" / "req-map-validation.json", payload)
+    map_path = run_dir / "graph" / "requirement-map.json"
+    if not map_path.exists():
+        return
+    req_map = _load_json(map_path)
+    adj = payload.get("adjustments") or {}
+    if adj.get("addToModify"):
+        existing = req_map.get("modify") or []
+        existing_paths = {f.get("path") for f in existing}
+        for entry in adj["addToModify"]:
+            if entry.get("path") and entry["path"] not in existing_paths and is_implementation_path(entry["path"]):
+                existing.append(entry)
+        req_map["modify"] = existing
+    if adj.get("addToCreate"):
+        existing = req_map.get("create") or []
+        existing_paths = {f.get("path") for f in existing}
+        for entry in adj["addToCreate"]:
+            if entry.get("path") and entry["path"] not in existing_paths and is_implementation_path(entry["path"]):
+                existing.append(entry)
+        req_map["create"] = existing
+    if adj.get("dropPaths"):
+        drop = {str(p).replace("\\", "/") for p in adj["dropPaths"]}
+        req_map["modify"] = [f for f in (req_map.get("modify") or []) if f.get("path", "").replace("\\", "/") not in drop]
+        req_map["create"] = [f for f in (req_map.get("create") or []) if f.get("path", "").replace("\\", "/") not in drop]
+    if adj.get("reorderExecution"):
+        req_map["executionOrder"] = [p for p in adj["reorderExecution"] if is_implementation_path(p)]
+    req_map["coverageValidated"] = True
+    req_map["coverageScore"] = payload.get("coverageScore")
+    _write_json(map_path, req_map)
+
+
+def _merge_post_implement_review(run_dir: Path, payload: dict[str, Any]) -> None:
+    """Persist post-implementation code review results."""
+    _write_json(run_dir / "implementation" / "post-implement-review.json", payload)

@@ -88,8 +88,8 @@ GATE_REQUIREMENTS: dict[str, list[Precondition]] = {
     "uiforgemax_review_plan": [_require_status(Status.PLAN_READY, Status.PLAN_REVIEWED)],
     # Implementation is the guarded step: approved plan AND passing review.
     "uiforgemax_implement": [_not_terminal, _plan_approved_and_reviewed],
-    # Tests only after implementation has begun.
-    "uiforgemax_run_tests": [_require_status(Status.IMPLEMENTING, Status.TESTING)],
+    # Tests only after implementation has begun (or visual validation completed/skipped).
+    "uiforgemax_run_tests": [_require_status(Status.IMPLEMENTING, Status.TESTING, Status.VISUAL_VALIDATED)],
     # Approvals must target the right waiting state.
     "uiforgemax_approve_api": [_require_status(Status.AWAITING_API_APPROVAL)],
     "uiforgemax_approve_understanding": [

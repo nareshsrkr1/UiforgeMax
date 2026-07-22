@@ -1,7 +1,7 @@
-"""Deterministic file evidence from graph.json when NL ``graphify query`` times out.
+"""Deterministic file evidence from graph.json via keyword matching.
 
-NL queries on Windows often exceed 25s even on small graphs. Scanning node
-``source_file`` / labels is enough for UI theming tickets and keeps the pipeline moving.
+Stack-agnostic: uses mediated keywords from upstream mediations, not hardcoded
+file patterns. Serves as fast deterministic evidence before any graphify query.
 """
 
 from __future__ import annotations
@@ -11,11 +11,37 @@ import re
 from pathlib import Path
 from typing import Any
 
-_STYLE_RE = re.compile(
-    r"style|css|theme|dark|nav|sidebar|background|layout|app\.tsx|page",
-    re.I,
+_IMPL_SUFFIXES = (
+    ".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".less", ".html",
+    ".py", ".go", ".rs", ".java", ".cs", ".rb", ".php", ".vue", ".svelte",
 )
-_IMPL_SUFFIXES = (".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".html")
+
+_CONFIG_FILES = {
+    # JS/TS
+    "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "tsconfig.json", "jsconfig.json", "project.json", "nx.json", "angular.json",
+    "vite.config.ts", "vite.config.js", "webpack.config.js", "webpack.config.ts",
+    "next.config.js", "next.config.mjs", "nuxt.config.ts", "nuxt.config.js",
+    "jest.config.js", "jest.config.ts", "vitest.config.ts", "svelte.config.js",
+    ".eslintrc.js", ".eslintrc.json", "eslint.config.js",
+    "tailwind.config.js", "tailwind.config.ts", "postcss.config.js",
+    # Python
+    "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "poetry.lock",
+    "pipfile", "pipfile.lock",
+    # Java/Kotlin
+    "pom.xml", "build.gradle", "build.gradle.kts",
+    "settings.gradle", "settings.gradle.kts", "gradle.properties",
+    # Go / Rust
+    "cargo.toml", "cargo.lock", "go.mod", "go.sum",
+    # .NET
+    "nuget.config",
+    # Ruby / PHP
+    "gemfile", "gemfile.lock", "composer.json", "composer.lock",
+    # General
+    "readme.md", "readme.txt", "changelog.md", "license", "license.md",
+    "dockerfile", "docker-compose.yml", "docker-compose.yaml",
+    "makefile", ".gitignore", ".editorconfig",
+}
 
 
 def lexical_evidence_from_graph(
@@ -24,13 +50,16 @@ def lexical_evidence_from_graph(
     keywords: list[str] | None = None,
     limit: int = 24,
 ) -> list[dict[str, str]]:
-    """Return NODE-like dicts ``{label, source_file, source_location}`` from graph.json."""
+    """Return NODE-like dicts from graph.json matched by keywords."""
     try:
         data = json.loads(Path(graph_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
 
     needles = [k.lower() for k in (keywords or []) if k]
+    if not needles:
+        return []
+
     nodes_out: list[dict[str, str]] = []
     seen: set[str] = set()
 
@@ -40,20 +69,15 @@ def lexical_evidence_from_graph(
         src = (n.get("source_file") or n.get("file") or "").replace("\\", "/")
         if not src or not src.lower().endswith(_IMPL_SUFFIXES):
             continue
+        basename = Path(src).name.lower()
+        if basename in _CONFIG_FILES:
+            continue
         label = str(n.get("label") or n.get("id") or src)
         blob = f"{label} {src}".lower()
         score = 0
-        if _STYLE_RE.search(blob):
-            score += 2
         for k in needles:
             if k and k in blob:
                 score += 3
-        # Always keep app shell / stylesheet paths even without keyword hit.
-        name = Path(src).name.lower()
-        if name in {"app.tsx", "app.jsx", "styles.css", "index.css", "global.css", "index.html"}:
-            score += 4
-        if "sidebar" in blob or "nav" in blob:
-            score += 2
         if score <= 0:
             continue
         key = src.lower()
@@ -78,8 +102,17 @@ def lexical_evidence_from_graph(
 
 
 def keywords_from_requirements(requirements: dict[str, Any] | None) -> list[str]:
+    """Extract search keywords from requirements — stack-agnostic."""
     if not requirements:
-        return ["dark", "nav", "sidebar", "background", "style", "theme"]
+        return []
+    strategy = requirements.get("graphSearchStrategy")
+    if strategy and strategy.get("keywords"):
+        kws = list(strategy["keywords"])
+        kws.extend(strategy.get("componentNames") or [])
+        return [k.lower() for k in kws if k][:12]
+    hints = requirements.get("graphSearchHints")
+    if hints and hints.get("keywords"):
+        return [k.lower() for k in hints["keywords"] if k][:12]
     parts = [requirements.get("summary") or ""]
     for ac in requirements.get("acceptanceCriteria") or []:
         if isinstance(ac, dict):
@@ -87,19 +120,21 @@ def keywords_from_requirements(requirements: dict[str, Any] | None) -> list[str]
         else:
             parts.append(str(ac))
     blob = " ".join(parts).lower()
-    base = ["dark", "nav", "sidebar", "background", "style", "theme", "css"]
-    extra = [w for w in ("layout", "page", "chrome", "token") if w in blob]
-    return base + extra
-
-
-_STYLE_CANDIDATES = (
-    "src/styles.css",
-    "src/index.css",
-    "src/App.css",
-    "src/theme.css",
-    "styles.css",
-    "index.css",
-)
+    stop = {
+        "the", "and", "for", "with", "this", "that", "from", "into",
+        "should", "must", "will", "have", "been", "using", "uses",
+        "when", "then", "also", "each", "every", "only", "both",
+    }
+    tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", blob)
+    out: list[str] = []
+    for t in tokens:
+        t = t.lower()
+        if t in stop or t in out:
+            continue
+        out.append(t)
+        if len(out) >= 10:
+            break
+    return out
 
 
 def supplement_style_files(
@@ -108,26 +143,7 @@ def supplement_style_files(
     *,
     allow_file_discovery: bool = False,
 ) -> list[dict[str, str]]:
-    """Optional on-disk stylesheet probe — OFF unless file discovery is explicitly allowed.
-
-    Default path is graph-only (``lexical_evidence_from_graph``). File discovery is for
-    when graph queries fail and mediation opts in (``UIFORGEMAX_ALLOW_FILE_DISCOVERY=1``).
-    """
+    """Optional on-disk file probe — OFF unless file discovery is explicitly allowed."""
     if not allow_file_discovery or project_root is None:
         return nodes
-    root = Path(project_root)
-    have = {n.get("source_file", "").replace("\\", "/") for n in nodes}
-    out = list(nodes)
-    for rel in _STYLE_CANDIDATES:
-        if rel in have:
-            continue
-        if (root / rel).is_file():
-            out.append(
-                {
-                    "label": rel,
-                    "source_file": rel,
-                    "source_location": "fs-style-supplement",
-                }
-            )
-            have.add(rel)
-    return out
+    return nodes
