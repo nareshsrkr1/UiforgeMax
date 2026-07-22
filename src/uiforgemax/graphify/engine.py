@@ -11,11 +11,16 @@ from uiforgemax.graphify.cli_runner import GraphifyCliError, run_merge_graphs, r
 from uiforgemax.graphify.stack import detect_stack
 
 
-def graphify_update(project_root: Path) -> dict[str, Any]:
-    """Update one repo via real ``graphify update``; return a small meta index."""
+def graphify_update(project_root: Path, *, log_dir: Path | None = None) -> dict[str, Any]:
+    """Update one repo via real ``graphify update``; return a small meta index.
+
+    ``log_dir``, when given, is where the live diagnostic log lands instead of
+    inside the target project's own ``graphify-out/`` — pass the run directory
+    so debug logs stay with UiForgeMax's own artifacts, not the target repo.
+    """
     root = Path(project_root)
     stack = detect_stack(root)
-    update = run_update(root)
+    update = run_update(root, log_dir=log_dir)
 
     # Hard gate: exit code 0 + a graph.json on disk is not proof of a USABLE
     # graph — a run that silently indexed nothing still passes that check.
@@ -30,9 +35,8 @@ def graphify_update(project_root: Path) -> dict[str, Any]:
             "into query/plan stages with no usable graph. Likely causes: an "
             "over-broad .gitignore/.graphifyignore excluding all source files, "
             "a permissions/AV issue silently blocking file reads during indexing, "
-            "or graphify not recognizing this stack. Re-run "
-            "`python -m graphify update <root> --force --no-cluster` directly in "
-            "a terminal and inspect its stdout/stderr for what it actually scanned."
+            "or graphify not recognizing this stack. Check the live log for what "
+            f"it actually scanned: {update.get('logFile')}"
         )
 
     return {
@@ -41,6 +45,7 @@ def graphify_update(project_root: Path) -> dict[str, Any]:
         "stack": stack,
         "graphifyOut": update["graphifyOut"],
         "graphJson": update["graphJson"],
+        "logFile": update.get("logFile"),
         "architecture": {
             "type": stack["primary"],
             "projectCount": 1 if not stack["empty"] else 0,
@@ -54,9 +59,21 @@ def graphify_update(project_root: Path) -> dict[str, Any]:
     }
 
 
-def graphify_update_multi(roots: dict[str, Path]) -> dict[str, dict[str, Any]]:
-    """Run real Graphify update on every registered root."""
-    return {name: graphify_update(path) for name, path in roots.items()}
+def graphify_update_multi(
+    roots: dict[str, Path], *, run_dir: Path | None = None
+) -> dict[str, dict[str, Any]]:
+    """Run real Graphify update on every registered root.
+
+    ``run_dir``, when given, routes each root's diagnostic log to
+    ``<run_dir>/graph/by-root/<name>/graphify-update.log`` — alongside that
+    root's existing ``meta.json``/``graph.json`` copy — instead of inside the
+    target project itself.
+    """
+    result: dict[str, dict[str, Any]] = {}
+    for name, path in roots.items():
+        log_dir = Path(run_dir) / "graph" / "by-root" / name if run_dir else None
+        result[name] = graphify_update(path, log_dir=log_dir)
+    return result
 
 
 def graphify_merge(

@@ -8,13 +8,84 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from uiforgemax.pipeline.toolchain import _kill_process_tree
+
 
 class GraphifyCliError(RuntimeError):
     pass
+
+
+def _run_logged(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    timeout: int,
+    log_path: Path,
+) -> tuple[int | None, str, bool]:
+    """Run ``cmd``, streaming output to ``log_path`` LIVE (tail-able from a second
+    terminal while it runs), with the exact command/cwd/timeout recorded up front.
+
+    Unlike ``subprocess.run(..., capture_output=True)``, which buffers
+    everything silently until the process ends or is killed, this writes each
+    output line to disk as it arrives — so a hang or a slow scan is visible in
+    real time (``Get-Content -Wait <log_path>``), not just a static timeout
+    message after the fact with zero insight into what was actually running.
+
+    Returns ``(returncode, combined_output, timed_out)``. On timeout the whole
+    process tree is killed (not just the top-level process) so a grandchild
+    spawned by a git/graphify hook cannot keep running or hold file handles.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat()
+    with open(log_path, "a", encoding="utf-8") as logf:
+        logf.write(
+            f"\n=== {now} ===\n"
+            f"cmd: {' '.join(cmd)}\n"
+            f"cwd: {cwd}\n"
+            f"timeout: {timeout}s\n"
+            "--- output (live) ---\n"
+        )
+        logf.flush()
+
+        proc = subprocess.Popen(
+            cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        )
+        lines: list[str] = []
+
+        def _drain() -> None:
+            try:
+                for line in proc.stdout:  # type: ignore[union-attr]
+                    lines.append(line)
+                    logf.write(line)
+                    logf.flush()
+            except (ValueError, OSError):
+                pass  # pipe closed by the timeout-kill path below
+
+        reader = threading.Thread(target=_drain, daemon=True)
+        reader.start()
+        reader.join(timeout)
+
+        if reader.is_alive():
+            logf.write(f"\n!!! TIMED OUT after {timeout}s — killing process tree !!!\n")
+            logf.flush()
+            _kill_process_tree(proc.pid)
+            reader.join(5)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            return None, "".join(lines), True
+
+        proc.wait()
+        logf.write(f"\n=== exit code {proc.returncode} ===\n")
+        logf.flush()
+        return proc.returncode, "".join(lines), False
 
 
 def _is_store_python_alias(exe: str | None) -> bool:
@@ -213,13 +284,24 @@ def _ensure_graphifyignore(root: Path) -> None:
         pass  # best-effort — indexing still works via .gitignore alone
 
 
-def run_update(project_root: Path, *, force: bool = False, no_cluster: bool = True) -> dict[str, Any]:
+def run_update(
+    project_root: Path,
+    *,
+    force: bool = False,
+    no_cluster: bool = True,
+    log_dir: Path | None = None,
+) -> dict[str, Any]:
     """Run ``python -m graphify update <root>`` → ``<root>/graphify-out/graph.json``.
 
     Reuses a non-empty existing graph unless ``force=True`` (avoids 3+ minute
     reindexes on every advance retry). Timeout defaults to 420s; override with
     ``UIFORGEMAX_GRAPHIFY_UPDATE_TIMEOUT``. On timeout, falls back to an existing
     graph when available instead of failing the whole run.
+
+    ``log_dir``, when given, is where the live diagnostic log is written
+    instead of ``<project>/graphify-out/`` — pass the UiForgeMax run directory
+    so the log lives with the run's own artifacts, not inside the target
+    project (which may be committed and shouldn't gain debug files).
     """
     root = Path(project_root).resolve()
     out_dir = root / "graphify-out"
@@ -238,26 +320,30 @@ def run_update(project_root: Path, *, force: bool = False, no_cluster: bool = Tr
         cmd.append("--no-cluster")
 
     timeout = int(os.environ.get("UIFORGEMAX_GRAPHIFY_UPDATE_TIMEOUT", "420"))
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(root))
-    except subprocess.TimeoutExpired as exc:
+    log_path = Path(log_dir) / "graphify-update.log" if log_dir else out_dir / "uiforgemax-update.log"
+    returncode, output, timed_out = _run_logged(cmd, cwd=root, timeout=timeout, log_path=log_path)
+
+    if timed_out:
         reused = _existing_graph_result(root, reason=f"update timed out after {timeout}s; using prior graph")
         if reused:
-            reused["stderr"] = str(exc)
+            reused["stderr"] = output
+            reused["logFile"] = str(log_path)
             return reused
         raise GraphifyCliError(
             f"graphify update timed out after {timeout}s for {root} and no reusable graph.json exists. "
-            f"Set UIFORGEMAX_GRAPHIFY_UPDATE_TIMEOUT higher or pre-warm graphify-out/."
-        ) from exc
+            f"Set UIFORGEMAX_GRAPHIFY_UPDATE_TIMEOUT higher or pre-warm graphify-out/. "
+            f"Full live output (what it was actually doing when killed) is in: {log_path}"
+        )
 
-    if proc.returncode != 0 or not graph_path.exists():
+    if returncode != 0 or not graph_path.exists():
         reused = _existing_graph_result(root, reason="update failed; using prior graph")
         if reused:
-            reused["stderr"] = (proc.stderr or proc.stdout or "").strip()
+            reused["stderr"] = output.strip()
+            reused["logFile"] = str(log_path)
             return reused
         raise GraphifyCliError(
-            f"graphify update failed for {root} (exit {proc.returncode}): "
-            f"{(proc.stderr or proc.stdout or '').strip()}"
+            f"graphify update failed for {root} (exit {returncode}): {output.strip()} "
+            f"Full output also in: {log_path}"
         )
 
     summary = _summarize_graph(graph_path)
@@ -265,9 +351,10 @@ def run_update(project_root: Path, *, force: bool = False, no_cluster: bool = Tr
         "root": str(root),
         "graphifyOut": str(out_dir),
         "graphJson": str(graph_path),
+        "logFile": str(log_path),
         "reused": False,
-        "stdout": (proc.stdout or "").strip(),
-        "stderr": (proc.stderr or "").strip(),
+        "stdout": output.strip(),
+        "stderr": "",
         **summary,
     }
 

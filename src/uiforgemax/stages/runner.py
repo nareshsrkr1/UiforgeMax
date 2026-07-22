@@ -339,7 +339,7 @@ def _graphify_update(ctx: ToolContext, state: RunState) -> StageResult:
     roots = _project_roots(ctx, state)
     run_dir = _run_dir(ctx, state)
     with StageTimer(run_dir, Stage.GRAPHIFY_UPDATE.value) as t:
-        per_root = graphify_update_multi(roots)
+        per_root = graphify_update_multi(roots, run_dir=run_dir)
         graph_dir = run_dir / "graph"
         graph_dir.mkdir(parents=True, exist_ok=True)
         project_paths: dict[str, str] = {}
@@ -389,7 +389,7 @@ def _graph_merge(ctx: ToolContext, state: RunState) -> StageResult:
             per_root[name] = _load_json(meta_path)
 
     if not per_root:
-        per_root = graphify_update_multi(roots)
+        per_root = graphify_update_multi(roots, run_dir=run_dir)
 
     classification = _load_classification(run_dir)
     surface = classification.get("surface") or state.artifacts.get("surface")
