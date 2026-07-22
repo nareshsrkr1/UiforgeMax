@@ -12,6 +12,35 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from uiforgemax.pipeline.toolchain import _kill_process_tree
+
+_GIT_TIMEOUT_SECONDS = 20
+
+
+def _git_run(args: list[str], *, cwd: str, timeout: int = _GIT_TIMEOUT_SECONDS) -> None:
+    """Best-effort git call that can never block the pipeline indefinitely.
+
+    Branch/add/commit bookkeeping is supplementary to the actual file writes,
+    not required for plan correctness. A stale ``.git/index.lock`` from an
+    earlier interrupted run, a corporate hook phoning home, or a GPG-signing
+    prompt waiting on stdin that will never arrive must never hang
+    ``uiforgemax_advance`` forever — soft-fail and move on instead.
+    """
+    try:
+        proc = subprocess.Popen(
+            ["git", *args], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+    except FileNotFoundError:
+        return
+    try:
+        proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc.pid)
+        try:
+            proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
 
 class PartialImplementError(Exception):
     """Raised by :func:`apply_plan` when some plan files were written but others
@@ -81,17 +110,7 @@ def apply_plan(
     branch = "uiforgemax/feature-run"
 
     for root in {str(r) for r in roots.values()}:
-        try:
-            subprocess.run(
-                ["git", "checkout", "-b", branch],
-                cwd=root,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except FileNotFoundError:
-            branch = None
-            break
+        _git_run(["checkout", "-b", branch], cwd=root)
 
     # Scaffold / legacy fixture writers only — not product UI for a specific app.
     templates = {
@@ -161,16 +180,8 @@ def apply_plan(
 
         _write(target, content)
         changed.append(rel)
-        try:
-            subprocess.run(["git", "add", rel], cwd=root, check=False)
-            subprocess.run(
-                ["git", "commit", "-m", f"uiforgemax: {rel}"],
-                cwd=root,
-                capture_output=True,
-                check=False,
-            )
-        except FileNotFoundError:
-            pass
+        _git_run(["add", rel], cwd=root)
+        _git_run(["commit", "-m", f"uiforgemax: {rel}"], cwd=root)
 
     # Hard-fail on partial writes: if some files were written but others were
     # skipped, the plan has gaps that will produce broken or incomplete code.
@@ -214,14 +225,7 @@ def _apply_plan_subtasked(
     branch = "uiforgemax/feature-run"
 
     for root in {str(r) for r in roots.values()}:
-        try:
-            subprocess.run(
-                ["git", "checkout", "-b", branch],
-                cwd=root, capture_output=True, text=True, check=False,
-            )
-        except FileNotFoundError:
-            branch = None
-            break
+        _git_run(["checkout", "-b", branch], cwd=root)
 
     templates = _build_template_map()
     patches = _build_patch_map()
@@ -278,20 +282,11 @@ def _apply_plan_subtasked(
 
             _write(target, content)
             st_changed.append(rel)
-            try:
-                subprocess.run(["git", "add", rel], cwd=root, check=False)
-            except FileNotFoundError:
-                pass
+            _git_run(["add", rel], cwd=root)
 
         if st_changed:
             commit_root = resolve_root(roots, st_by_id.get(st_id, {}))
-            try:
-                subprocess.run(
-                    ["git", "commit", "-m", f"uiforgemax [{st_id}]: {st.get('title', st_id)}"],
-                    cwd=commit_root, capture_output=True, check=False,
-                )
-            except FileNotFoundError:
-                pass
+            _git_run(["commit", "-m", f"uiforgemax [{st_id}]: {st.get('title', st_id)}"], cwd=commit_root)
 
         changed.extend(st_changed)
         skipped.extend(st_skipped)
@@ -325,14 +320,8 @@ def _apply_plan_subtasked(
             continue
         _write(target, content)
         changed.append(rel)
-        try:
-            subprocess.run(["git", "add", rel], cwd=root, check=False)
-            subprocess.run(
-                ["git", "commit", "-m", f"uiforgemax: {rel}"],
-                cwd=root, capture_output=True, check=False,
-            )
-        except FileNotFoundError:
-            pass
+        _git_run(["add", rel], cwd=root)
+        _git_run(["commit", "-m", f"uiforgemax: {rel}"], cwd=root)
 
     if changed and skipped:
         skipped_summary = "; ".join(f"{s['path']} ({s['reason']})" for s in skipped)
