@@ -100,6 +100,36 @@ def test_add_prompt_allowed_without_jira_env(monkeypatch, tmp_path):
     assert (ctx.store.run_dir(run_id) / "inputs" / "prompt.txt").exists()
 
 
+def test_next_tool_is_advance_after_prompt_attached(monkeypatch, tmp_path):
+    """Once an input is attached, intake is satisfied — steer to advance, not add_prompt."""
+    ctx, project = _ctx(monkeypatch, tmp_path, jira=False)
+    run_id = json.loads(lifecycle.start_run(ctx, project_root=str(project)))["runId"]
+    out = json.loads(inputs.add_prompt(ctx, run_id, "Build a settings page"))
+    assert out["nextTool"] == "uiforgemax_advance"
+    # Adding more inputs is still possible via alternatives, just not the default.
+    assert "uiforgemax_add_prompt" in out["alternatives"]
+
+
+def test_next_tool_is_advance_after_jira_attached():
+    """Regression: with Jira configured AND a jira input already attached,
+    nextTool must be advance — NOT add_jira again (which stalled the agent)."""
+    from uiforgemax.mcp_response import tool_response
+    from uiforgemax.state import RunState, Status
+
+    state = RunState(run_id="r1", project_root="C:/tmp", status=Status.INTAKE)
+    state.inputs["modes"] = ["jira"]  # jira already attached this run
+    out = json.loads(tool_response(state, "jira fetched", jira_configured=True))
+    assert out["nextTool"] == "uiforgemax_advance"
+    assert "uiforgemax_add_jira" in out["alternatives"]
+
+
+def test_next_tool_still_add_jira_before_any_input(monkeypatch, tmp_path):
+    """Guard the other direction: with NO input yet + Jira configured, still add_jira."""
+    ctx, project = _ctx(monkeypatch, tmp_path, jira=True)
+    data = json.loads(lifecycle.start_run(ctx, project_root=str(project)))
+    assert data["nextTool"] == "uiforgemax_add_jira"
+
+
 def test_approve_plan_too_early_message(monkeypatch, tmp_path):
     ctx, project = _ctx(monkeypatch, tmp_path, jira=False)
     run_id = json.loads(lifecycle.start_run(ctx, project_root=str(project)))["runId"]

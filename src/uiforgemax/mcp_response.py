@@ -31,6 +31,17 @@ def _gate_next(
         # Human finishes npm/pip install; agent resumes with advance (tests-only retry).
         return "uiforgemax_advance", ["uiforgemax_resume_run", "uiforgemax_get_run_status"], blocked
     if status == Status.INTAKE:
+        modes = (state.inputs or {}).get("modes") or []
+        if modes:
+            # An input (jira/prompt/html/image) is already attached — intake is
+            # satisfied. Steer the agent to ADVANCE, not back to add_jira/add_prompt.
+            # Without this the agent gets nextTool=add_jira even after Jira is
+            # attached, has no signal to move forward, and stalls / asks the human.
+            return (
+                "uiforgemax_advance",
+                ["uiforgemax_add_jira", "uiforgemax_add_prompt", "uiforgemax_add_image"],
+                blocked,
+            )
         pending = _pending_issue_key(state)
         if prefer_jira_intake(jira_configured=jira_configured, pending_issue_key=pending):
             return "uiforgemax_add_jira", ["uiforgemax_add_prompt", "uiforgemax_add_image"], blocked

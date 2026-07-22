@@ -21,12 +21,35 @@ class GraphifyCliError(RuntimeError):
     pass
 
 
+def _clean_subprocess_env() -> dict[str, str]:
+    """Environment for spawned graphify processes — without UiForgeMax's own paths.
+
+    The MCP server is launched (via mcp.json) with ``PYTHONPATH`` pointing at
+    UiForgeMax's ``src`` so it can import ``uiforgemax``. A plain
+    ``subprocess.Popen`` inherits that, so every ``python -m graphify`` call —
+    AND each of graphify's ~16 AST worker subprocesses — starts up with that
+    extra sys.path root. graphify is installed in site-packages and does not
+    need it; inheriting it only adds per-process import-resolution overhead,
+    which is badly amplified on machines where endpoint AV scans every file
+    open (manual runs from a clean shell don't carry this and stay fast).
+    Strip ``PYTHONPATH`` (and UiForgeMax's own env vars) so the subprocess env
+    matches a clean manual invocation.
+    """
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    for key in list(env):
+        if key.startswith("UIFORGEMAX_"):
+            env.pop(key, None)
+    return env
+
+
 def _run_logged(
     cmd: list[str],
     *,
     cwd: Path,
     timeout: int,
     log_path: Path,
+    env: dict[str, str] | None = None,
 ) -> tuple[int | None, str, bool]:
     """Run ``cmd``, streaming output to ``log_path`` LIVE (tail-able from a second
     terminal while it runs), with the exact command/cwd/timeout recorded up front.
@@ -43,18 +66,28 @@ def _run_logged(
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc).isoformat()
+    inherited_pythonpath = os.environ.get("PYTHONPATH", "(unset)")
+    subproc_pythonpath = (env or {}).get("PYTHONPATH", "(unset)")
     with open(log_path, "a", encoding="utf-8") as logf:
         logf.write(
             f"\n=== {now} ===\n"
             f"cmd: {' '.join(cmd)}\n"
             f"cwd: {cwd}\n"
             f"timeout: {timeout}s\n"
+            f"MCP PYTHONPATH (inherited): {inherited_pythonpath}\n"
+            f"subprocess PYTHONPATH (used): {subproc_pythonpath}\n"
             "--- output (live) ---\n"
         )
         logf.flush()
 
         proc = subprocess.Popen(
-            cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+            cmd,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
         )
         lines: list[str] = []
 
@@ -321,7 +354,9 @@ def run_update(
 
     timeout = int(os.environ.get("UIFORGEMAX_GRAPHIFY_UPDATE_TIMEOUT", "420"))
     log_path = Path(log_dir) / "graphify-update.log" if log_dir else out_dir / "uiforgemax-update.log"
-    returncode, output, timed_out = _run_logged(cmd, cwd=root, timeout=timeout, log_path=log_path)
+    returncode, output, timed_out = _run_logged(
+        cmd, cwd=root, timeout=timeout, log_path=log_path, env=_clean_subprocess_env()
+    )
 
     if timed_out:
         reused = _existing_graph_result(root, reason=f"update timed out after {timeout}s; using prior graph")
@@ -407,6 +442,7 @@ def run_query(
             text=True,
             timeout=timeout,
             cwd=str(graph_json.parent),  # graphify-out/ — avoid walking up into OneDrive root
+            env=_clean_subprocess_env(),  # don't inherit UiForgeMax PYTHONPATH into graphify
         )
     except subprocess.TimeoutExpired:
         return {
@@ -452,7 +488,7 @@ def run_merge_graphs(graph_jsons: list[Path], out_path: Path) -> dict[str, Any]:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [graphify_python(), "-m", "graphify", "merge-graphs", *[str(p) for p in graph_jsons], "--out", str(out_path)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=_clean_subprocess_env())
     if proc.returncode != 0 or not out_path.exists():
         raise GraphifyCliError(
             f"graphify merge-graphs failed (exit {proc.returncode}): "
