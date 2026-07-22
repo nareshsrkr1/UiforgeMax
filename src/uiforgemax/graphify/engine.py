@@ -16,6 +16,25 @@ def graphify_update(project_root: Path) -> dict[str, Any]:
     root = Path(project_root)
     stack = detect_stack(root)
     update = run_update(root)
+
+    # Hard gate: exit code 0 + a graph.json on disk is not proof of a USABLE
+    # graph — a run that silently indexed nothing still passes that check.
+    # Query/plan/test stages against an empty graph fail confusingly, much
+    # later, far from the real cause. Fail loudly here instead, for any
+    # project genuinely detected as non-empty (greenfield legitimately has
+    # zero nodes and must NOT trip this).
+    if not stack["empty"] and int(update.get("nodeCount") or 0) == 0:
+        raise GraphifyCliError(
+            f"graphify update reported success but produced an EMPTY graph "
+            f"(0 nodes) for a non-empty project at {root}. Refusing to continue "
+            "into query/plan stages with no usable graph. Likely causes: an "
+            "over-broad .gitignore/.graphifyignore excluding all source files, "
+            "a permissions/AV issue silently blocking file reads during indexing, "
+            "or graphify not recognizing this stack. Re-run "
+            "`python -m graphify update <root> --force --no-cluster` directly in "
+            "a terminal and inspect its stdout/stderr for what it actually scanned."
+        )
+
     return {
         "generatedBy": "graphify-cli",
         "projectRoot": str(root.resolve()),

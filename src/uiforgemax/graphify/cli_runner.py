@@ -156,6 +156,63 @@ def _existing_graph_result(root: Path, *, reason: str) -> dict[str, Any] | None:
     }
 
 
+_DEFAULT_GRAPHIFYIGNORE = """\
+# Auto-written by UiForgeMax on first index — keeps graphify off dependency
+# trees, build output, and caches for ANY stack. Edit freely; UiForgeMax
+# never overwrites this file once it exists.
+node_modules/
+dist/
+build/
+out/
+.next/
+.nuxt/
+.svelte-kit/
+coverage/
+.nyc_output/
+.turbo/
+.cache/
+.parcel-cache/
+.vite/
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.tox/
+target/
+bin/
+obj/
+vendor/
+.git/
+.svn/
+.hg/
+graphify-out/
+*.log
+.DS_Store
+"""
+
+
+def _ensure_graphifyignore(root: Path) -> None:
+    """Write a generic, stack-agnostic .graphifyignore once per project.
+
+    graphify already merges .gitignore + .graphifyignore (excludes only ever
+    grow, never re-include), so this is pure insurance — it guarantees
+    dependency/build/cache trees are skipped even when a repo's .gitignore is
+    missing, incomplete, or intentionally tracks generated files. Never
+    overwrites an existing file, so any project-specific customization
+    persists across runs.
+    """
+    ignore_path = root / ".graphifyignore"
+    if ignore_path.exists():
+        return
+    try:
+        ignore_path.write_text(_DEFAULT_GRAPHIFYIGNORE, encoding="utf-8")
+    except OSError:
+        pass  # best-effort — indexing still works via .gitignore alone
+
+
 def run_update(project_root: Path, *, force: bool = False, no_cluster: bool = True) -> dict[str, Any]:
     """Run ``python -m graphify update <root>`` → ``<root>/graphify-out/graph.json``.
 
@@ -167,6 +224,7 @@ def run_update(project_root: Path, *, force: bool = False, no_cluster: bool = Tr
     root = Path(project_root).resolve()
     out_dir = root / "graphify-out"
     graph_path = out_dir / "graph.json"
+    _ensure_graphifyignore(root)
 
     if not force:
         reused = _existing_graph_result(root, reason="warm graphify-out present")
