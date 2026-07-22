@@ -1,6 +1,6 @@
 # UiForgeMax Agent — tool allowlist only
 
-**MCP-only agent.** Use **only** the tools below. If `uiforgemax_*` MCP tools are unavailable (call fails, server not listed, not connected): **STOP immediately** — do not use Shell, Edit, or other tools as a workaround. Tell the user to enable the `uiforgemax` MCP server in Cursor Settings → MCP and reload.
+**MCP-only agent.** Use **only** the tools below. If `uiforgemax_*` MCP tools are unavailable (call fails, server not listed, not connected): **STOP immediately** — do not use Shell, Edit, or other tools as a workaround. Tell the user to enable the `uiforgemax` MCP server in their IDE's MCP settings and reload the window.
 
 **Never explore the target project manually** (no `Read`/`Glob`/`Grep`/`Shell` on it, not even
 read-only) — Graphify does that inside `uiforgemax_advance`. The only files you may `Read`
@@ -70,7 +70,7 @@ uiforgemax_answer_clarifications
    - Verifies Python + **built-in Graphify** (`uiforgemax.graphify` inside MCP venv) + every path
      given (default root and each component) — each must actually exist.
    - Saves `%APPDATA%\UiForgeMax\session.json`: `pythonExecutable`, `workspaceRoot`, `projectRoots`, `graphifyReady`.
-   - If Python check fails, retry with `python_executable='C:/path/to/.venv/Scripts/python.exe'` (your MCP venv from `.cursor/mcp.json`).
+   - If Python check fails, retry with `python_executable='C:/path/to/.venv/Scripts/python.exe'` (the MCP venv configured in your IDE's MCP config).
    - `UIFORGEMAX_GRAPHIFY_PYTHON` accepts a **full path** or a **command name** (`python` / `python3`); commands are resolved via PATH and kept only if `import graphify` succeeds.
 4. **`uiforgemax_start_run(project_root='…', mode='start'|'resume', issue_key=…)`**
    - User said **start** → `mode='start'` (default): **clean slate** — archives prior incomplete
@@ -88,17 +88,20 @@ Preflight must find it on the session python. Artifacts land in each repo's `gra
 
 ## IDE setup
 
-### Cursor
-- Set this doc as your default Agent rule (`.cursor/rules/uiforgemax-agent.mdc` pointing to this file).
-- Mode: **Agent** — any capable model; no Bugbot/subagent required.
-- MCP: `.cursor/mcp.json` → venv python + Jira env vars.
-- Invoke via `/uiforge` or agent mode.
+UiForgeMax is IDE-agnostic — it works in any MCP-capable agent IDE. Two things
+must be wired up, wherever your IDE keeps them:
 
-### VS Code (Copilot Chat)
-- Copy this file as your agent instructions (e.g. `.github/copilot-instructions.md` or workspace agent config).
-- MCP: same `.cursor/mcp.json` format works — VS Code reads `mcp.json` from `.vscode/` too.
-  Copy/symlink `.cursor/mcp.json` → `.vscode/mcp.json` if needed.
-- The tool allowlist and flow are identical — both IDEs call the same MCP tools.
+1. **Agent rules** — load this document as the driving agent's instructions, via
+   whatever mechanism your IDE uses for persistent agent/system rules (a rules
+   file, custom instructions, or an agent-config entry that points at this file).
+2. **MCP server** — register `uiforgemax` in your IDE's MCP config with the venv
+   python as `command`, `["-m", "uiforgemax.server"]` as args, and the Jira env
+   vars. The MCP config JSON shape is the same across IDEs; only its location
+   differs (consult your IDE's MCP docs for where that file lives).
+
+Use the IDE in its **agent mode** with any capable model — no special
+subagent/reviewer is required. The tool allowlist and flow below are identical
+regardless of IDE; every IDE calls the same MCP tools.
 
 ## project_root examples
 
@@ -220,5 +223,16 @@ reactive path is a fallback for the unexpected case, not the normal flow.
 5. At human gates, show artifact paths and wait for approval.
 6. At `awaiting_mediation`, read `runsDir` + `modelMediation` and call `uiforgemax_submit_mediation`.
 7. Images: `uiforgemax_add_image(run_id, path, role)` — `reference|before|after|wireframe|mockup`.
+8. **Never pause to ask "should I continue / advance?"** — drive the pipeline
+   forward on your own. The ONLY places you stop and hand control to the human are:
+   (a) `waitForHuman: true` (the plan-approval gate), (b) `stop: true` in a
+   response, (c) MCP unavailable, or (d) a genuine `BLOCKED`/error you cannot
+   resolve. In every other state — including right after `add_jira`/`add_prompt`,
+   after each mediation `submit`, and between all automated stages — immediately
+   call whatever `nextTool` says (usually `uiforgemax_advance`) without asking
+   permission first. Chaining `add_jira → advance → (mediation) → submit →
+   advance → …` up to the plan gate is the expected, correct behavior, not
+   something to confirm with the human each hop. Do not narrate "if you want, I
+   can continue" — just continue.
 
 Call `uiforgemax_get_pipeline_guide` for full stage documentation.
