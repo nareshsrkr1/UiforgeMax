@@ -203,7 +203,10 @@ def fetch_issue(issue_key: str, config: JiraConfig) -> dict[str, Any]:
     use_fixtures = os.getenv("UIFORGEMAX_USE_FIXTURES", "").lower() in ("1", "true", "yes")
 
     if config.is_configured and not use_fixtures:
-        url = f"{config.base_url.rstrip('/')}/rest/api/3/issue/{issue_key}"
+        # Cloud (email+token) supports /rest/api/3/; Server/Data Center (PAT-only,
+        # no email) only ever supports /rest/api/2/ — /3/ 404s there.
+        api_version = "2" if config.uses_bearer else "3"
+        url = f"{config.base_url.rstrip('/')}/rest/api/{api_version}/issue/{issue_key}"
         params = {"fields": "summary,description,labels,attachment,comment"}
         headers, auth = _request_auth(config)
         try:
