@@ -40,6 +40,11 @@ def _clean_subprocess_env() -> dict[str, str]:
     for key in list(env):
         if key.startswith("UIFORGEMAX_"):
             env.pop(key, None)
+    # Force unbuffered stdout/stderr so graphify's progress lines appear in the
+    # live log immediately, even if the process later hangs. Without this,
+    # piped stdout is block-buffered and a hang shows an empty log (output stuck
+    # in an unflushed buffer) — exactly the "started, then silence" symptom.
+    env["PYTHONUNBUFFERED"] = "1"
     return env
 
 
@@ -83,6 +88,11 @@ def _run_logged(
         proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
+            stdin=subprocess.DEVNULL,  # never inherit the MCP server's JSON-RPC
+            # stdin — if graphify/a dep reads stdin (update prompt, confirmation)
+            # it must get instant EOF, not hang forever waiting on a pipe that
+            # never delivers input. This is the classic "works in a terminal,
+            # hangs when spawned by a server" bug.
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -443,6 +453,7 @@ def run_query(
             timeout=timeout,
             cwd=str(graph_json.parent),  # graphify-out/ — avoid walking up into OneDrive root
             env=_clean_subprocess_env(),  # don't inherit UiForgeMax PYTHONPATH into graphify
+            stdin=subprocess.DEVNULL,  # never block reading the MCP server's stdin
         )
     except subprocess.TimeoutExpired:
         return {
@@ -488,7 +499,9 @@ def run_merge_graphs(graph_jsons: list[Path], out_path: Path) -> dict[str, Any]:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [graphify_python(), "-m", "graphify", "merge-graphs", *[str(p) for p in graph_jsons], "--out", str(out_path)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=_clean_subprocess_env())
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=120, env=_clean_subprocess_env(), stdin=subprocess.DEVNULL
+    )
     if proc.returncode != 0 or not out_path.exists():
         raise GraphifyCliError(
             f"graphify merge-graphs failed (exit {proc.returncode}): "
