@@ -13,6 +13,7 @@ from uiforgemax.pipeline.toolchain import (
     js_deps_ready,
     rewrite_js_command,
     run_with_timeout,
+    subprocess_env,
 )
 
 
@@ -107,3 +108,32 @@ def test_run_with_timeout_kills_grandchild_not_just_shell(tmp_path: Path):
     # Well under the grandchild's 20s sleep — proves the tree was killed
     # rather than communicate() blocking on the surviving grandchild's pipes.
     assert elapsed < 12
+
+
+def test_run_with_timeout_does_not_hang_on_stdin_read(tmp_path: Path):
+    """A subprocess trying to read stdin must get instant EOF, not hang forever
+    waiting for input that a non-interactive MCP server can never supply — the
+    same bug class that caused graphify to hang under the MCP server."""
+    script = tmp_path / "read_stdin.py"
+    script.write_text(
+        "import sys\n"
+        "data = sys.stdin.read()  # would block forever on an open, empty pipe\n"
+        "print('got', repr(data))\n",
+        encoding="utf-8",
+    )
+    cmd = f'"{sys.executable}" "{script}"'
+    result = run_with_timeout(cmd, cwd=tmp_path, timeout=10)
+    assert result.timed_out is False
+    assert result.returncode == 0
+
+
+def test_subprocess_env_strips_pythonpath(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", r"C:\Users\me\UiforgeMax\src")
+    env = subprocess_env()
+    assert "PYTHONPATH" not in env
+
+
+def test_subprocess_env_strips_uiforgemax_vars(monkeypatch):
+    monkeypatch.setenv("UIFORGEMAX_DATA_ROOT", r"C:\data")
+    env = subprocess_env()
+    assert not any(k.startswith("UIFORGEMAX_") for k in env)

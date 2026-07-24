@@ -171,6 +171,7 @@ def _python_has_graphify(exe: str, *, timeout: float = 3.0) -> bool:
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,  # never block on inherited MCP stdin
         )
         return proc.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
@@ -234,6 +235,7 @@ def ensure_graphify_available(exe: str | None = None) -> dict[str, Any]:
             capture_output=True,
             text=True,
             timeout=20,
+            stdin=subprocess.DEVNULL,  # never block on inherited MCP stdin
         )
         # Exit 0 is enough — under MCP/OneDrive, stdout can be empty even when
         # import succeeded (print swallowed / encoding), which used to false-fail.

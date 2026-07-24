@@ -65,8 +65,8 @@ def _guard(fn, *args, **kwargs) -> str:
 def uiforgemax_preflight(
     project_root: str | None = None,
     python_executable: str | None = None,
-    components: str | None = None,
-    workspace_folders: str | None = None,
+    components: str | dict | None = None,
+    workspace_folders: str | list | None = None,
 ) -> str:
     """Verify Python, built-in Graphify module, and optional workspace(s) before any run.
 
@@ -107,7 +107,7 @@ def uiforgemax_add_workspace_root(run_id: str, name: str, path: str) -> str:
 def uiforgemax_start_run(
     project_root: str | None = None,
     policy: str | None = None,
-    components: str | None = None,
+    components: str | dict | None = None,
     mode: str | None = "start",
     issue_key: str | None = None,
 ) -> str:

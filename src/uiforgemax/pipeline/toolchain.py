@@ -34,6 +34,7 @@ def _kill_process_tree(pid: int) -> None:
             ["taskkill", "/F", "/T", "/PID", str(pid)],
             capture_output=True,
             timeout=15,
+            stdin=subprocess.DEVNULL,
         )
         return
     import signal
@@ -68,6 +69,10 @@ def run_with_timeout(
         cwd=cwd,
         shell=True,
         text=True,
+        stdin=subprocess.DEVNULL,  # never inherit the MCP server's JSON-RPC stdin
+        # pipe — npm/node reading stdin for any reason (a prompt, a postinstall
+        # script waiting on input) must get instant EOF, not hang forever on a
+        # pipe that will never deliver input. Same fix as the graphify hang.
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
@@ -104,8 +109,16 @@ def subprocess_env() -> dict[str, str]:
     Prefers tools already on PATH. If discovery found binaries under Program Files
     (etc.), prepend those dirs so thin MCP PATHs still work — without requiring
     UIFORGEMAX_NODE / UIFORGEMAX_NPM in mcp.json.
+
+    Strips PYTHONPATH / UIFORGEMAX_* the same way graphify subprocesses do — the
+    MCP server is launched with PYTHONPATH pointing at UiForgeMax's own src/, and
+    npm/node/any subprocess-spawned Python tooling has no business inheriting it.
     """
     env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    for key in list(env):
+        if key.startswith("UIFORGEMAX_"):
+            env.pop(key, None)
     bins: list[str] = []
     node = resolve_node()
     npm = resolve_npm()

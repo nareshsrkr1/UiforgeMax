@@ -6,7 +6,11 @@ import json
 from pathlib import Path
 
 from uiforgemax.mcp_response import tool_response
-from uiforgemax.model_mediation.registry import MediationKind, build_mediation_request
+from uiforgemax.model_mediation.registry import (
+    MediationKind,
+    attach_artifact_contents,
+    build_mediation_request,
+)
 from uiforgemax.model_mediation.service import (
     apply_mediation,
     load_mediation_request,
@@ -109,7 +113,10 @@ def submit_mediation(
             state,
             f"Mediation saved. Next IDE mediation required: {kind.value}",
             stop=True,
-            extra={"modelMediation": request, "runsDir": str(run_dir)},
+            extra={
+                "modelMediation": attach_artifact_contents(request, run_dir),
+                "runsDir": str(run_dir),
+            },
         )
 
     state.status = _status_after_stage(stage)
@@ -130,7 +137,7 @@ def mediation_extra(ctx: ToolContext, state) -> dict:
     request = state.mediation.get("pending") or load_mediation_request(run_dir, key)
     extra: dict = {"runsDir": str(run_dir)}
     if request:
-        extra["modelMediation"] = request
+        extra["modelMediation"] = attach_artifact_contents(request, run_dir)
     return extra
 
 

@@ -92,7 +92,7 @@ def start_run(
     ctx: ToolContext,
     project_root: str | None = None,
     policy: str | None = None,
-    components: str | None = None,
+    components: str | dict | None = None,
     mode: str | None = "start",
     issue_key: str | None = None,
 ) -> str:

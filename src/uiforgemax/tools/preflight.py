@@ -17,8 +17,8 @@ def preflight(
     ctx: ToolContext,
     project_root: str | None = None,
     python_executable: str | None = None,
-    components: str | None = None,
-    workspace_folders: str | None = None,
+    components: str | dict | None = None,
+    workspace_folders: str | list | None = None,
 ) -> str:
     """Verify MCP runtime, Graphify module, optional workspace(s). Persists session.json.
 
@@ -317,6 +317,7 @@ def _check_python_executable(exe: str) -> dict[str, Any]:
             capture_output=True,
             text=True,
             timeout=10,
+            stdin=subprocess.DEVNULL,  # never block on inherited MCP stdin
         )
         version = (proc.stdout or proc.stderr or "").strip()
         return {"name": "PYTHON_EXECUTABLE", "ok": proc.returncode == 0, "detail": f"{exe} → {version}"}
@@ -381,6 +382,7 @@ def _check_graphify_subprocess(exe: str) -> dict[str, Any]:
             capture_output=True,
             text=True,
             timeout=30,
+            stdin=subprocess.DEVNULL,  # never block on inherited MCP stdin
         )
         # Exit 0 is enough — do not require stdout "ok" (can be empty under MCP stdio).
         ok = proc.returncode == 0
@@ -447,9 +449,13 @@ def _check_workspace(
     }
 
 
-def _parse_json_object(raw: str | None) -> tuple[dict[str, str], str | None]:
+def _parse_json_object(raw: str | dict | None) -> tuple[dict[str, str], str | None]:
     if not raw:
         return {}, None
+    # Agents often pass a real JSON object instead of a JSON-encoded string —
+    # accept both so preflight never fails on that alone.
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items()}, None
     try:
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
@@ -459,9 +465,13 @@ def _parse_json_object(raw: str | None) -> tuple[dict[str, str], str | None]:
         return {}, str(exc)
 
 
-def _parse_json_array(raw: str | None) -> tuple[list[str], str | None]:
+def _parse_json_array(raw: str | list | None) -> tuple[list[str], str | None]:
     if not raw:
         return [], None
+    # Accept a real list as well as a JSON-encoded array string — agents commonly
+    # pass ["C:/path"] directly, which a str-typed param would reject.
+    if isinstance(raw, list):
+        return [str(p) for p in raw], None
     try:
         parsed = json.loads(raw)
         if not isinstance(parsed, list):

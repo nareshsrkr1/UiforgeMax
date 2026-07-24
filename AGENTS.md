@@ -17,6 +17,9 @@
 Follow `nextTool` in each JSON response. Do not edit project files directly — MCP implements after the sole plan approval.
 
 At **`awaiting_mediation`**, use your IDE model + `uiforgemax_submit_mediation`.
+The response's `modelMediation.artifactContents` inlines the small artifacts — use
+those directly, do **not** re-Read those files. Only Read a `readArtifacts` path
+that is absent from `artifactContents` (large files like HTML / source snapshots).
 
 See `agent/uiforgemax-agent.md` for the full tool allowlist and workflow — enforced every
 session via `.cursor/rules/uiforgemax-agent.mdc` (`alwaysApply: true`), not just this link.

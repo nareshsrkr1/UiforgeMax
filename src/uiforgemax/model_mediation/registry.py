@@ -78,6 +78,49 @@ def _mediation_key(stage: Stage, kind: MediationKind) -> str:
     return f"{stage.value}::{kind.value}"
 
 
+_EMBED_MAX_BYTES = 60_000
+_EMBED_SUFFIXES = {".json", ".txt", ".md"}
+
+
+def attach_artifact_contents(request: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+    """Return a copy of ``request`` with SMALL readArtifacts inlined under
+    ``artifactContents``, so the driving agent does not need a separate
+    (permission-prompting) file Read for each one.
+
+    Only small text/JSON artifacts are embedded (``_EMBED_MAX_BYTES`` cap,
+    ``_EMBED_SUFFIXES`` only) — large files like ``inputs/page.html`` and big
+    ``graph/source-snapshots.json`` stay as paths (a single Read each, not
+    part of the many-small-JSON prompt storm). The saved-to-disk request is
+    left lean; only the agent-facing copy is enriched.
+    """
+    paths = request.get("readArtifacts") or []
+    contents: dict[str, str] = {}
+    for rel in paths:
+        if not isinstance(rel, str):
+            continue
+        target = run_dir / rel
+        try:
+            if not target.is_file():
+                continue
+            if target.suffix.lower() not in _EMBED_SUFFIXES:
+                continue
+            if target.stat().st_size > _EMBED_MAX_BYTES:
+                continue
+            contents[rel] = target.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    if not contents:
+        return request
+    enriched = dict(request)
+    enriched["artifactContents"] = contents
+    enriched["artifactContentsNote"] = (
+        "Small readArtifacts are inlined here. Use these directly — do NOT Read "
+        "these files again. Only Read a readArtifacts path that is absent from "
+        "artifactContents (large files like inputs/page.html or source snapshots)."
+    )
+    return enriched
+
+
 def build_mediation_request(
     stage: Stage,
     kind: MediationKind,

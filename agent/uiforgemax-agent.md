@@ -222,6 +222,10 @@ reactive path is a fallback for the unexpected case, not the normal flow.
 4. **Preflight first** — every new session.
 5. At human gates, show artifact paths and wait for approval.
 6. At `awaiting_mediation`, read `runsDir` + `modelMediation` and call `uiforgemax_submit_mediation`.
+   The response's `modelMediation.artifactContents` already inlines the small
+   artifacts — use those values directly and do **not** re-Read those files.
+   Only Read a `readArtifacts` path that is NOT present in `artifactContents`
+   (large files like `inputs/page.html` or `graph/source-snapshots.json`).
 7. Images: `uiforgemax_add_image(run_id, path, role)` — `reference|before|after|wireframe|mockup`.
 8. **Never pause to ask "should I continue / advance?"** — drive the pipeline
    forward on your own. The ONLY places you stop and hand control to the human are:

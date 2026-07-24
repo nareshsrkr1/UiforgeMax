@@ -28,7 +28,16 @@ def _git_run(args: list[str], *, cwd: str, timeout: int = _GIT_TIMEOUT_SECONDS) 
     """
     try:
         proc = subprocess.Popen(
-            ["git", *args], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            ["git", *args],
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,  # never let a GPG/credential prompt block on
+            # stdin — same fix as graphify/npm. Without this, EVERY call (git add
+            # runs once per file, git commit once per sub-task) could block for
+            # the full timeout if git ever tries to read stdin, not just a single
+            # permanent hang.
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
     except FileNotFoundError:
         return
