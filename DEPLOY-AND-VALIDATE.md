@@ -47,24 +47,97 @@ install is not editable -> re-run the `pip install -e .` line in step 1.
 
 ---
 
-## 3. Clean restart
+## 3. Clean restart (forceful — kill MCP + all child processes)
+
+Stale `uiforgemax.server` processes (and their graphify/npm children) are the usual
+reason VS Code/Cursor still behave like the old build after `git pull`. Do this
+**before** reloading the IDE.
+
+### 3a. List what is running
 
 ```powershell
-# Kill any running MCP server + its child processes
-Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-  Where-Object { $_.CommandLine -match "uiforgemax\.server" } |
-  ForEach-Object { taskkill /F /T /PID $_.ProcessId }
+Get-CimInstance Win32_Process |
+  Where-Object {
+    $_.Name -match '^(python|pythonw)\.exe$' -and
+    $_.CommandLine -match 'uiforgemax\.server|uiforgemax|graphify'
+  } |
+  Select-Object ProcessId, Name, CreationDate, CommandLine |
+  Format-List
 ```
 
-Then in the IDE: reload the window (or toggle the `uiforgemax` MCP server off/on).
+### 3b. Force-kill MCP servers **and the whole process tree**
 
-Confirm the server that comes back is NEW (CreationDate must be after your restart):
+`taskkill /F /T` kills the PID **and all child processes** (graphify update,
+npm/vitest spawned from tests, etc.).
 
 ```powershell
-Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-  Where-Object { $_.CommandLine -match "uiforgemax\.server" } |
-  Select-Object ProcessId, CreationDate
+# 1) Kill every uiforgemax.server tree
+Get-CimInstance Win32_Process |
+  Where-Object {
+    $_.Name -match '^(python|pythonw)\.exe$' -and
+    $_.CommandLine -match 'uiforgemax\.server'
+  } |
+  ForEach-Object {
+    Write-Host "Killing MCP tree PID=$($_.ProcessId)"
+    taskkill /F /T /PID $_.ProcessId 2>$null
+  }
+
+# 2) Sweep any leftover graphify / orphaned uiforgemax python workers
+Get-CimInstance Win32_Process |
+  Where-Object {
+    $_.Name -match '^(python|pythonw)\.exe$' -and
+    $_.CommandLine -match 'graphify|uiforgemax'
+  } |
+  ForEach-Object {
+    Write-Host "Killing leftover PID=$($_.ProcessId) :: $($_.CommandLine)"
+    taskkill /F /T /PID $_.ProcessId 2>$null
+  }
 ```
+
+### 3c. Confirm nothing is left
+
+```powershell
+$left = Get-CimInstance Win32_Process |
+  Where-Object {
+    $_.Name -match '^(python|pythonw)\.exe$' -and
+    $_.CommandLine -match 'uiforgemax\.server|graphify'
+  }
+if ($left) {
+  Write-Host "STILL RUNNING — kill again or reboot IDE:" -ForegroundColor Red
+  $left | Select-Object ProcessId, CommandLine
+} else {
+  Write-Host "OK — no uiforgemax.server / graphify processes left." -ForegroundColor Green
+}
+```
+
+### 3d. Restart in the IDE
+
+1. Toggle MCP server `uiforgemax` **Off**, wait 2s, then **On**  
+   (or Command Palette → **Developer: Reload Window**).
+2. Start a **new chat** — old chats keep old agent instructions / session state.
+3. Do **not** resume an old run if you meant a clean start; say `start …` with an
+   explicit `project_root`.
+
+### 3e. Confirm the server that came back is NEW
+
+`CreationDate` must be **after** the kill (not an old PID that survived):
+
+```powershell
+Get-CimInstance Win32_Process |
+  Where-Object {
+    $_.Name -match '^(python|pythonw)\.exe$' -and
+    $_.CommandLine -match 'uiforgemax\.server'
+  } |
+  Select-Object ProcessId, CreationDate, CommandLine
+```
+
+Also re-check freshness (same as step 2):
+
+```powershell
+<VENV>\Scripts\python.exe -c "import uiforgemax.pipeline.planning as p; print(p.__file__); print('plan_is_implementable', hasattr(p,'plan_is_implementable'))"
+```
+
+Expect a path under `<REPO>\src\...` and `plan_is_implementable True`.
 
 ---
 

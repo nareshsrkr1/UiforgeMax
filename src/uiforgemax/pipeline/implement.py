@@ -3,52 +3,16 @@
 Generic by design: real application changes come from IDE-mediated ``content``
 (or a small set of scaffold ``templateId``s for greenfield). MCP does **not**
 invent product-specific UI (themes, nav, pages) for a particular demo app.
+
+File writes only — no ``git checkout`` / ``git add`` / ``git commit``. The human
+reviews ``git status`` / diff and commits when they choose.
 """
 
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
-
-from uiforgemax.pipeline.toolchain import _kill_process_tree
-
-_GIT_TIMEOUT_SECONDS = 20
-
-
-def _git_run(args: list[str], *, cwd: str, timeout: int = _GIT_TIMEOUT_SECONDS) -> None:
-    """Best-effort git call that can never block the pipeline indefinitely.
-
-    Branch/add/commit bookkeeping is supplementary to the actual file writes,
-    not required for plan correctness. A stale ``.git/index.lock`` from an
-    earlier interrupted run, a corporate hook phoning home, or a GPG-signing
-    prompt waiting on stdin that will never arrive must never hang
-    ``uiforgemax_advance`` forever — soft-fail and move on instead.
-    """
-    try:
-        proc = subprocess.Popen(
-            ["git", *args],
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,  # never let a GPG/credential prompt block on
-            # stdin — same fix as graphify/npm. Without this, EVERY call (git add
-            # runs once per file, git commit once per sub-task) could block for
-            # the full timeout if git ever tries to read stdin, not just a single
-            # permanent hang.
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError:
-        return
-    try:
-        proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _kill_process_tree(proc.pid)
-        try:
-            proc.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
 
 
 class PartialImplementError(Exception):
@@ -62,7 +26,7 @@ class PartialImplementError(Exception):
     skipped:
         List of ``{path, reason}`` dicts for files that could not be written.
     branch:
-        Git branch name if a branch was created, or ``None`` if git is absent.
+        Always ``None`` — implement no longer creates git branches/commits.
     """
 
     def __init__(
@@ -71,7 +35,7 @@ class PartialImplementError(Exception):
         *,
         changed: list[str],
         skipped: list[dict[str, str]],
-        branch: str | None,
+        branch: str | None = None,
     ) -> None:
         super().__init__(message)
         self.changed = changed
@@ -116,10 +80,6 @@ def apply_plan(
 
     changed: list[str] = []
     skipped: list[dict[str, str]] = []
-    branch = "uiforgemax/feature-run"
-
-    for root in {str(r) for r in roots.values()}:
-        _git_run(["checkout", "-b", branch], cwd=root)
 
     # Scaffold / legacy fixture writers only — not product UI for a specific app.
     templates = {
@@ -189,8 +149,6 @@ def apply_plan(
 
         _write(target, content)
         changed.append(rel)
-        _git_run(["add", rel], cwd=root)
-        _git_run(["commit", "-m", f"uiforgemax: {rel}"], cwd=root)
 
     # Hard-fail when any planned file was skipped — including the all-skipped
     # case (0 written). Otherwise advance proceeds to TEST with no product changes.
@@ -212,11 +170,11 @@ def apply_plan(
             "fields for each skipped path, then uiforgemax_advance.",
             changed=changed,
             skipped=skipped,
-            branch=branch,
         )
 
     return {
-        "branch": branch,
+        "branch": None,
+        "gitCommits": False,
         "filesChanged": changed,
         "fileCount": len(changed),
         "skipped": skipped,
@@ -233,10 +191,6 @@ def _apply_plan_subtasked(
     changed: list[str] = []
     skipped: list[dict[str, str]] = []
     subtask_results: dict[str, dict[str, Any]] = {}
-    branch = "uiforgemax/feature-run"
-
-    for root in {str(r) for r in roots.values()}:
-        _git_run(["checkout", "-b", branch], cwd=root)
 
     templates = _build_template_map()
     patches = _build_patch_map()
@@ -293,11 +247,6 @@ def _apply_plan_subtasked(
 
             _write(target, content)
             st_changed.append(rel)
-            _git_run(["add", rel], cwd=root)
-
-        if st_changed:
-            commit_root = resolve_root(roots, st_by_id.get(st_id, {}))
-            _git_run(["commit", "-m", f"uiforgemax [{st_id}]: {st.get('title', st_id)}"], cwd=commit_root)
 
         changed.extend(st_changed)
         skipped.extend(st_skipped)
@@ -331,8 +280,6 @@ def _apply_plan_subtasked(
             continue
         _write(target, content)
         changed.append(rel)
-        _git_run(["add", rel], cwd=root)
-        _git_run(["commit", "-m", f"uiforgemax: {rel}"], cwd=root)
 
     if skipped:
         skipped_summary = "; ".join(f"{s['path']} ({s['reason']})" for s in skipped)
@@ -350,11 +297,11 @@ def _apply_plan_subtasked(
             "fields for each skipped path, then uiforgemax_advance.",
             changed=changed,
             skipped=skipped,
-            branch=branch,
         )
 
     return {
-        "branch": branch,
+        "branch": None,
+        "gitCommits": False,
         "filesChanged": changed,
         "fileCount": len(changed),
         "skipped": skipped,
