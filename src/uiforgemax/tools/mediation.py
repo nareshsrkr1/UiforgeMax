@@ -95,6 +95,29 @@ def submit_mediation(
                 stop=True,
                 extra={"runsDir": str(run_dir), "modelMediation": state.mediation.get("pending")},
             )
+    if kind == MediationKind.PLAN_REFINEMENT:
+        from uiforgemax.pipeline.planning import plan_actions_missing_content
+
+        # Merge-shaped payload: validate the create/modify it would write.
+        probe = {
+            "create": data.get("create") if data.get("create") is not None else [],
+            "modify": data.get("modify") if data.get("modify") is not None else [],
+        }
+        # If mediation omitted both keys, keep existing plan check after apply —
+        # but when it sends path lists, every entry must be writable.
+        if probe["create"] or probe["modify"]:
+            missing = plan_actions_missing_content(probe)
+            if missing:
+                return tool_response(
+                    state,
+                    "BLOCKED: PLAN_REFINEMENT rejected — create/modify entries need full "
+                    f"`content` (or known greenfield templateId/patchId). Missing for: "
+                    f"{', '.join(missing[:12])}{'…' if len(missing) > 12 else ''}. "
+                    "Re-read graph/source-snapshots.json, edit each file, and resubmit "
+                    "with content= the FULL file body.",
+                    stop=True,
+                    extra={"runsDir": str(run_dir), "modelMediation": state.mediation.get("pending")},
+                )
     save_mediation_response(run_dir, mediation_key, data)
     apply_mediation(run_dir, kind, data)
 

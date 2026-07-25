@@ -383,18 +383,46 @@ def _merge_plan(run_dir: Path, payload: dict[str, Any]) -> None:
         pass
     plan["mediatedByIde"] = True
     plan["source"] = "requirement-map.json+ide_mediation"
-    _write_json(plan_path, plan)
-    # Refresh human-facing Gate 3 package + markdown after IDE refinement.
+    # Refresh human-facing Gate 3 package + plan-review after IDE refinement.
+    # Mediation can empty create/modify; never leave a stale verdict=pass behind.
     try:
-        from uiforgemax.pipeline.planning import _plan_markdown, build_plan_approval_package
+        from uiforgemax.pipeline.planning import (
+            _plan_markdown,
+            build_plan_approval_package,
+            build_plan_review,
+        )
+        from uiforgemax.pipeline.target_sanitize import sanitize_plan_targets
 
+        plan = sanitize_plan_targets(plan)
+        reqs = (
+            _load_json(run_dir / "requirements.normalized.json")
+            if (run_dir / "requirements.normalized.json").exists()
+            else {}
+        )
+        req_map = (
+            _load_json(run_dir / "graph" / "requirement-map.json")
+            if (run_dir / "graph" / "requirement-map.json").exists()
+            else {}
+        )
+        api = (
+            _load_json(run_dir / "api-resolution.json")
+            if (run_dir / "api-resolution.json").exists()
+            else {}
+        )
+        review = build_plan_review(
+            plan, requirements=reqs, req_map=req_map, api_resolution=api
+        )
+        plan["risks"] = review["risks"]
+        plan["blockers"] = review["blockers"]
+        _write_json(plan_path, plan)
+        _write_json(run_dir / "plans" / "plan-review.json", review)
         (run_dir / "plans" / "implementation-plan.md").write_text(
             _plan_markdown(plan), encoding="utf-8"
         )
         approval = build_plan_approval_package(run_dir, plan)
         _write_json(run_dir / "plans" / "plan-approval.json", approval)
     except Exception:  # noqa: BLE001
-        pass
+        _write_json(plan_path, plan)
 
 
 def _merge_tests(run_dir: Path, payload: dict[str, Any]) -> None:

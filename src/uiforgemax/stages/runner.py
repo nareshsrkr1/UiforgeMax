@@ -633,12 +633,37 @@ def _plan(ctx: ToolContext, state: RunState) -> StageResult:
 
 
 def _plan_review(ctx: ToolContext, state: RunState) -> StageResult:
+    from uiforgemax.pipeline.planning import (
+        EMPTY_PLAN_BLOCKER,
+        MISSING_CONTENT_BLOCKER,
+        plan_actions_missing_content,
+        plan_has_file_actions,
+    )
+
     run_dir = _run_dir(ctx, state)
     review = _load_json(run_dir / "plans" / "plan-review.json")
+    plan = _load_json(run_dir / "plans" / "implementation-plan.json")
     state.artifacts["planReview"] = review
-    if review.get("verdict") != "pass":
+    blockers = list(review.get("blockers") or [])
+    if not plan_has_file_actions(plan) and EMPTY_PLAN_BLOCKER not in blockers:
+        blockers.append(EMPTY_PLAN_BLOCKER)
+    missing_bodies = plan_actions_missing_content(plan)
+    if missing_bodies and not any(MISSING_CONTENT_BLOCKER[:40] in str(b) for b in blockers):
+        blockers.append(
+            f"{MISSING_CONTENT_BLOCKER} Missing content for: {', '.join(missing_bodies[:12])}"
+        )
+    if review.get("verdict") != "pass" or blockers:
+        changes = review.get("requiredPlanChanges") or blockers
         state.status = Status.BLOCKED
-        return StageResult(stop=True, message=f"Plan review blocked: {review.get('requiredPlanChanges')}")
+        state.record(Stage.PLAN_REVIEW, "blocked", str(changes)[:200])
+        return StageResult(
+            stop=True,
+            message=(
+                f"Plan review blocked: {changes}. "
+                "Empty create/modify, missing file content, or hard blockers must be fixed "
+                "via PLAN_REFINEMENT / request_changes — do not open the human approval gate."
+            ),
+        )
     state.status = Status.PLAN_REVIEWED
     state.record(Stage.PLAN_REVIEW, "ok", "pass")
     return StageResult(stop=False, message="Plan review passed.")
@@ -646,8 +671,41 @@ def _plan_review(ctx: ToolContext, state: RunState) -> StageResult:
 
 def _gate_plan(ctx: ToolContext, state: RunState) -> StageResult:
     from uiforgemax.env_flags import skip_plan_approval
+    from uiforgemax.pipeline.planning import (
+        EMPTY_PLAN_BLOCKER,
+        MISSING_CONTENT_BLOCKER,
+        plan_actions_missing_content,
+        plan_has_file_actions,
+        plan_is_implementable,
+    )
 
     run_dir = _run_dir(ctx, state)
+    plan = _load_json(run_dir / "plans" / "implementation-plan.json")
+    if not plan_has_file_actions(plan):
+        state.status = Status.BLOCKED
+        state.record(Stage.GATE_PLAN, "blocked", EMPTY_PLAN_BLOCKER)
+        return StageResult(
+            stop=True,
+            message=(
+                f"BLOCKED: {EMPTY_PLAN_BLOCKER} "
+                "Fix requirement-map / PLAN_REFINEMENT so create/modify has real "
+                "implementation files, then request_changes or advance again. "
+                "Do not approve an empty plan."
+            ),
+        )
+    if not plan_is_implementable(plan):
+        missing = plan_actions_missing_content(plan)
+        state.status = Status.BLOCKED
+        state.record(Stage.GATE_PLAN, "blocked", MISSING_CONTENT_BLOCKER)
+        return StageResult(
+            stop=True,
+            message=(
+                f"BLOCKED: {MISSING_CONTENT_BLOCKER} "
+                f"Missing content for: {', '.join(missing[:12])}"
+                f"{'…' if len(missing) > 12 else ''}. "
+                "PLAN_REFINEMENT must return full file bodies before human approval."
+            ),
+        )
 
     if not state.approvals.plan.approved and skip_plan_approval():
         from uiforgemax.tools.approvals import _freeze_approved_plan, _now
@@ -768,6 +826,18 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
     )
     count = int(summary.get("fileCount") or 0)
     skipped = summary.get("skipped") or []
+    if expected == 0:
+        state.status = Status.FAILED
+        state.record(Stage.IMPLEMENT, "failed", "0 create/modify actions in approved plan")
+        return StageResult(
+            stop=True,
+            message=(
+                "IMPLEMENT FAILED: approved plan has 0 create/modify actions — nothing to write. "
+                "This should have been blocked at plan review. "
+                "Use request_changes / PLAN_REFINEMENT to add real file targets."
+            ),
+            extra={"diffSummary": summary},
+        )
     if expected > 0 and count == 0:
         state.status = Status.FAILED
         state.record(Stage.IMPLEMENT, "failed", f"0/{expected} files; skipped={skipped}")
@@ -815,6 +885,28 @@ def _test(ctx: ToolContext, state: RunState) -> StageResult:
     # Resuming after human install — leave pause status so mediation / tests can run.
     if state.status == Status.AWAITING_USER_INSTALL:
         state.status = Status.TESTING
+
+    # Do not invent tests for a noop implement — that is how empty plans reached
+    # TEST_GENERATION and looked "done" with only a generated *.test.tsx.
+    diff_path = run_dir / "implementation" / "diff-summary.json"
+    if diff_path.exists():
+        try:
+            diff = _load_json(diff_path)
+        except Exception:  # noqa: BLE001
+            diff = {}
+        file_count = int(diff.get("fileCount") or 0)
+        if file_count <= 0:
+            state.status = Status.FAILED
+            state.record(Stage.TEST, "failed", "no implementation files changed")
+            return StageResult(
+                stop=True,
+                message=(
+                    "TEST BLOCKED: implementation/diff-summary.json shows 0 files changed. "
+                    "Fix the plan / PLAN_REFINEMENT (supply content for create/modify), "
+                    "re-run implement, then test. Do not generate tests for a noop implement."
+                ),
+                extra={"diffSummary": diff},
+            )
 
     # TEST_GENERATION first; TEST_ENV_RECOVERY when env-gap.json says needs_recovery
     pause = _maybe_pause_mediation(ctx, state, Stage.TEST)
@@ -916,8 +1008,10 @@ def _test(ctx: ToolContext, state: RunState) -> StageResult:
                 pause.message = (
                     "IDE model mediation required: TEST_ENV_RECOVERY — "
                     f"tooling/env gap (attempt {gap.get('attempt')}). "
-                    "Read tests/toolchain-facts.json and decide installHints[] + run[] "
-                    "(install is required when needInstallAny=true), then submit_mediation + advance."
+                    "Read tests/command-logs.json + tests/toolchain-facts.json; "
+                    "if Cannot find module / missingPackages → installHints for those packages "
+                    "(any stack), then corrected run[]. Prefer install over skipTests. "
+                    "submit_mediation + advance."
                 )
                 return pause
         state.status = Status.FAILED

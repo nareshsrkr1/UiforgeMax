@@ -44,11 +44,8 @@ def test_apply_plan_writes_mediated_content(tmp_path: Path):
     assert "NewThing" in (root / "src" / "App.tsx").read_text(encoding="utf-8")
 
 
-def test_all_skipped_plan_returns_empty_not_error(tmp_path: Path):
-    """When ALL actions are skipped (0 changed, N skipped) we return a dict, not an error.
-
-    PartialImplementError only fires when some files wrote AND some skipped.
-    """
+def test_all_skipped_plan_raises_not_silent_success(tmp_path: Path):
+    """All-skipped (0 written) must hard-fail — never advance as a successful implement."""
     root = tmp_path / "any-app"
     (root / "src").mkdir(parents=True)
     (root / "src" / "App.tsx").write_text("export function App() { return null }\n", encoding="utf-8")
@@ -65,11 +62,10 @@ def test_all_skipped_plan_returns_empty_not_error(tmp_path: Path):
         ],
         "executionOrder": ["src/App.tsx"],
     }
-    # All-skipped: 0 written, 1 skipped — no PartialImplementError, just a normal result.
-    summary = apply_plan(root, plan)
-    assert summary["fileCount"] == 0
-    assert len(summary["skipped"]) == 1
-    assert "content=" in summary["skipped"][0]["reason"] or "patchId" in summary["skipped"][0]["reason"]
+    with pytest.raises(PartialImplementError) as exc:
+        apply_plan(root, plan)
+    assert exc.value.changed == []
+    assert len(exc.value.skipped) == 1
     assert (root / "src" / "App.tsx").read_text(encoding="utf-8") == original
 
 

@@ -76,9 +76,49 @@ def approve_understanding(ctx: ToolContext, run_id: str, by: str = "user") -> st
 
 
 def approve_plan(ctx: ToolContext, run_id: str, by: str = "user") -> str:
+    from uiforgemax.pipeline.planning import (
+        EMPTY_PLAN_BLOCKER,
+        MISSING_CONTENT_BLOCKER,
+        plan_actions_missing_content,
+        plan_has_file_actions,
+        plan_is_implementable,
+    )
+
     state = ctx.store.load(run_id)
     assert_gate("uiforgemax_approve_plan", state)
     run_dir = ctx.store.run_dir(run_id)
+    plan_path = run_dir / "plans" / "implementation-plan.json"
+    plan: dict = {}
+    if plan_path.exists():
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            plan = {}
+    if not plan_has_file_actions(plan):
+        state.status = Status.BLOCKED
+        state.record(Stage.GATE_PLAN, "blocked", EMPTY_PLAN_BLOCKER)
+        ctx.store.save(state)
+        return tool_response(
+            state,
+            f"BLOCKED: {EMPTY_PLAN_BLOCKER} "
+            "Do not approve an empty plan. Use request_changes / re-run PLAN_REFINEMENT "
+            "so create/modify has real implementation files, then advance again.",
+            stop=True,
+        )
+    if not plan_is_implementable(plan):
+        missing = plan_actions_missing_content(plan)
+        state.status = Status.BLOCKED
+        state.record(Stage.GATE_PLAN, "blocked", MISSING_CONTENT_BLOCKER)
+        ctx.store.save(state)
+        return tool_response(
+            state,
+            f"BLOCKED: {MISSING_CONTENT_BLOCKER} "
+            f"Missing content for: {', '.join(missing[:12])}"
+            f"{'…' if len(missing) > 12 else ''}. "
+            "Do not approve a path-only plan — re-run PLAN_REFINEMENT with full file "
+            "`content` for every create/modify (from graph/source-snapshots.json).",
+            stop=True,
+        )
     _freeze_approved_plan(run_dir)
     state.approvals.plan.approved = True
     state.approvals.plan.at = _now()

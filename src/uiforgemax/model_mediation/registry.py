@@ -539,8 +539,12 @@ def build_mediation_request(
                 "If deps are not installed, include installHints[] in THIS response "
                 "(npm install / pip install / mvn dependency:resolve / dotnet restore / …) — "
                 "do not assume MCP PATH has tools or that packages are already installed.\n"
+                "When emitting DOM tests that import @testing-library/react (or vue/svelte), "
+                "also install peer @testing-library/dom if the project does not already have it "
+                "(include installHints). Same idea for other stacks: declare peers the tests need.\n"
                 "Return tests[] bodies AND run[] (cwd/root correct for monorepos). "
                 "Every tests[].path you emit MUST appear in some run[] command.\n"
+                "Keep this stack-agnostic — pick the framework from the repo, not a fixed template.\n"
                 "MCP only writes + executes."
             ),
             "readArtifacts": [
@@ -598,27 +602,37 @@ def build_mediation_request(
         return {
             **base,
             "instruction": (
-                "YOU decide the recovery steps for THIS stack. MCP does not invent a fixed "
-                "workflow — it only executes your allowlisted installHints[] and run[].\n"
-                "REQUIRED reading: tests/toolchain-facts.json (authoritative).\n"
+                "YOU decide the recovery steps for THIS stack (any language/framework — not "
+                "Angular-only, not Node-only). MCP does not invent a fixed workflow — it only "
+                "executes your allowlisted installHints[] and run[].\n"
+                "REQUIRED reading: tests/toolchain-facts.json + tests/command-logs.json "
+                "(full stdout/stderr) + tests/env-gap.json.\n"
                 "Rules:\n"
-                "1) If needInstallAny / root.needInstall is true → you MUST return installHints[] "
-                "(use suggestedInstall cwd/command, e.g. npm install at monorepo installRootRel). "
-                "Empty installHints in that case is REJECTED.\n"
-                "2) If hoistedRunner / avoidLocalRunnerPath is set → do NOT call "
+                "1) Read command-logs first. If you see Cannot find module / ModuleNotFoundError / "
+                "No module named / missingPackages → return installHints for THOSE packages "
+                "(e.g. npm install -D @testing-library/dom, pip install <pkg>, etc.) then a "
+                "corrected run[]. skipTests is REJECTED until install was attempted.\n"
+                "2) If needInstallAny / root.needInstall / missingPackages → installHints[] "
+                "REQUIRED (copy suggestedInstall when present). Empty installHints is REJECTED.\n"
+                "3) If hoistedRunner / avoidLocalRunnerPath → do NOT call "
                 "./node_modules/<runner> under the app; use npm exec/npx from app or "
                 "node <runnerPath> with cwd at jsInstallRoot.\n"
-                "3) Prefer absolute node/npm from facts.node / facts.npm when PATH is empty.\n"
-                "4) System installs (winget/choco) only if needed and "
+                "4) Prefer absolute node/npm from facts.node / facts.npm when PATH is empty.\n"
+                "5) System installs (winget/choco) only if needed and "
                 "UIFORGEMAX_ALLOW_TOOL_INSTALL=1.\n"
-                "5) Or skipTests=true with skipReason.\n"
-                "6) Playwright: if suite=playwright failed/unavailable, prefer installHints "
+                "6) You may also rewrite tests[] (fix bad imports/mocks) when the log shows "
+                "a test-authoring issue, not only install.\n"
+                "7) skipTests=true only after install/run strategies are exhausted, with "
+                "skipReason that cites the log.\n"
+                "8) Playwright: if suite=playwright failed/unavailable, prefer installHints "
                 "(npm install -D @playwright/test + npx playwright install chromium at "
                 "installRootRel) once; MCP soft-skips further Playwright if still missing.\n"
-                "Do not claim deps are installed when runnerAtInstallRoot is false."
+                "Do not claim deps are installed when runnerAtInstallRoot is false or "
+                "missingPackages is non-empty."
             ),
             "readArtifacts": [
                 "tests/toolchain-facts.json",
+                "tests/command-logs.json",
                 "tests/env-gap.json",
                 "tests/install-log.json",
                 "tests/unit-results.json",

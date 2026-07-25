@@ -338,10 +338,11 @@ def run_update(
 ) -> dict[str, Any]:
     """Run ``python -m graphify update <root>`` → ``<root>/graphify-out/graph.json``.
 
-    Reuses a non-empty existing graph unless ``force=True`` (avoids 3+ minute
-    reindexes on every advance retry). Timeout defaults to 420s; override with
-    ``UIFORGEMAX_GRAPHIFY_UPDATE_TIMEOUT``. On timeout, falls back to an existing
-    graph when available instead of failing the whole run.
+    Always invokes ``graphify update`` so an existing ``graphify-out/`` still gets
+    an incremental refresh (docs + changed files). Pass ``force=True`` for a full
+    rebuild (``--force``). Timeout defaults to 420s; override with
+    ``UIFORGEMAX_GRAPHIFY_UPDATE_TIMEOUT``. On timeout or CLI failure, falls back to
+    an existing non-empty graph when available instead of failing the whole run.
 
     ``log_dir``, when given, is where the live diagnostic log is written
     instead of ``<project>/graphify-out/`` — pass the UiForgeMax run directory
@@ -352,11 +353,6 @@ def run_update(
     out_dir = root / "graphify-out"
     graph_path = out_dir / "graph.json"
     _ensure_graphifyignore(root)
-
-    if not force:
-        reused = _existing_graph_result(root, reason="warm graphify-out present")
-        if reused:
-            return reused
 
     cmd = [graphify_python(), "-m", "graphify", "update", str(root)]
     if force:

@@ -192,18 +192,20 @@ def apply_plan(
         _git_run(["add", rel], cwd=root)
         _git_run(["commit", "-m", f"uiforgemax: {rel}"], cwd=root)
 
-    # Hard-fail on partial writes: if some files were written but others were
-    # skipped, the plan has gaps that will produce broken or incomplete code.
-    # Surface this as an error immediately rather than silently committing
-    # partial work.  Callers can catch this and set status=FAILED.
-    if changed and skipped:
+    # Hard-fail when any planned file was skipped — including the all-skipped
+    # case (0 written). Otherwise advance proceeds to TEST with no product changes.
+    if skipped:
         skipped_summary = "; ".join(
             f"{s['path']} ({s['reason']})" for s in skipped
         )
         raise PartialImplementError(
-            f"PARTIAL IMPLEMENT: {len(changed)} file(s) written but "
-            f"{len(skipped)} file(s) were skipped.\n"
-            f"Skipped: {skipped_summary}\n"
+            (
+                f"PARTIAL IMPLEMENT: {len(changed)} file(s) written but "
+                f"{len(skipped)} file(s) were skipped.\n"
+                if changed
+                else f"IMPLEMENT WROTE NOTHING: all {len(skipped)} planned file(s) were skipped.\n"
+            )
+            + f"Skipped: {skipped_summary}\n"
             "PLAN_REFINEMENT mediation must supply 'content' for every create/modify "
             "action — MCP does not invent product-specific code for files it has not "
             "been given content for.  Re-run PLAN_REFINEMENT mediation with 'content' "
@@ -332,12 +334,16 @@ def _apply_plan_subtasked(
         _git_run(["add", rel], cwd=root)
         _git_run(["commit", "-m", f"uiforgemax: {rel}"], cwd=root)
 
-    if changed and skipped:
+    if skipped:
         skipped_summary = "; ".join(f"{s['path']} ({s['reason']})" for s in skipped)
         raise PartialImplementError(
-            f"PARTIAL IMPLEMENT: {len(changed)} file(s) written but "
-            f"{len(skipped)} file(s) were skipped.\n"
-            f"Skipped: {skipped_summary}\n"
+            (
+                f"PARTIAL IMPLEMENT: {len(changed)} file(s) written but "
+                f"{len(skipped)} file(s) were skipped.\n"
+                if changed
+                else f"IMPLEMENT WROTE NOTHING: all {len(skipped)} planned file(s) were skipped.\n"
+            )
+            + f"Skipped: {skipped_summary}\n"
             "PLAN_REFINEMENT mediation must supply 'content' for every create/modify "
             "action — MCP does not invent product-specific code for files it has not "
             "been given content for.  Re-run PLAN_REFINEMENT mediation with 'content' "

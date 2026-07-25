@@ -253,6 +253,139 @@ def _derive_topology(run_dir: Path, requirements: dict[str, Any], req_map: dict[
     }
 
 
+EMPTY_PLAN_BLOCKER = "Plan has no create/modify files — nothing to implement."
+MISSING_CONTENT_BLOCKER = (
+    "Plan lists create/modify paths but PLAN_REFINEMENT did not supply writable "
+    "`content` (or a known greenfield templateId/patchId). Implement cannot invent "
+    "product code from path+purpose alone — re-run PLAN_REFINEMENT with full file bodies."
+)
+
+# Scaffold / legacy writers that can produce bytes without mediated `content`.
+_WRITABLE_WITHOUT_CONTENT_TEMPLATES = frozenset(
+    {
+        "api.export_route",
+        "client.export_customers",
+        "page.customer_list",
+        "test.customer_list",
+        "greenfield.backend_requirements",
+        "greenfield.backend_init",
+        "greenfield.backend_store",
+        "greenfield.backend_main",
+        "greenfield.backend_readme",
+        "greenfield.ui_index",
+        "greenfield.ui_styles",
+        "greenfield.ui_serve",
+        "greenfield.ui_readme",
+        "greenfield.readme",
+        "greenfield.start_ps1",
+    }
+)
+_WRITABLE_WITHOUT_CONTENT_PATCHES = frozenset(
+    {
+        "app.register_export",
+        "data_access.export",
+        "portal.app_routing",
+        "portal.green_button",
+    }
+)
+
+
+def plan_has_file_actions(plan: dict[str, Any] | None) -> bool:
+    """True when the plan has at least one create or modify file action."""
+    if not plan:
+        return False
+    return bool(plan.get("create") or plan.get("modify"))
+
+
+def plan_file_action_count(plan: dict[str, Any] | None) -> int:
+    if not plan:
+        return 0
+    return len(plan.get("create") or []) + len(plan.get("modify") or [])
+
+
+def action_has_writable_body(action: dict[str, Any] | None) -> bool:
+    """True when implement can write this action without inventing product code."""
+    if not action:
+        return False
+    content = action.get("content")
+    if content is not None and str(content).strip() != "":
+        return True
+    tid = str(action.get("templateId") or "")
+    if tid in _WRITABLE_WITHOUT_CONTENT_TEMPLATES or tid.startswith("greenfield."):
+        return True
+    pid = str(action.get("patchId") or "")
+    if pid in _WRITABLE_WITHOUT_CONTENT_PATCHES:
+        return True
+    return False
+
+
+def plan_actions_missing_content(plan: dict[str, Any] | None) -> list[str]:
+    """Paths that would be skipped at implement (path+purpose only, no body)."""
+    if not plan:
+        return []
+    missing: list[str] = []
+    for action in list(plan.get("create") or []) + list(plan.get("modify") or []):
+        if not action_has_writable_body(action):
+            missing.append(str(action.get("path") or "?"))
+    return missing
+
+
+def plan_is_implementable(plan: dict[str, Any] | None) -> bool:
+    """Non-empty create/modify AND every action has content or a known scaffold id."""
+    return plan_has_file_actions(plan) and not plan_actions_missing_content(plan)
+
+
+def build_plan_review(
+    plan: dict[str, Any],
+    *,
+    requirements: dict[str, Any] | None = None,
+    req_map: dict[str, Any] | None = None,
+    api_resolution: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build plan-review.json from the current plan.
+
+    Soft risks (e.g. README-only) stay advisory. Hard blockers — including an
+    empty create/modify list or paths without ``content`` — always force
+    ``verdict: revise`` so we never open the human plan gate for a plan that
+    would write 0 product files after approval.
+    """
+    requirements = requirements or {}
+    req_map = req_map or {}
+    api_resolution = api_resolution or {}
+    create = list(plan.get("create") or [])
+    modify = list(plan.get("modify") or [])
+    risks, blockers = _derive_risks_blockers(
+        req_map, api_resolution, create, modify, requirements
+    )
+    for b in plan.get("blockers") or []:
+        if b not in blockers:
+            blockers.append(b)
+    for r in plan.get("risks") or []:
+        if r not in risks:
+            risks.append(r)
+
+    missing_bodies = plan_actions_missing_content(plan)
+    if missing_bodies and MISSING_CONTENT_BLOCKER not in blockers:
+        blockers.append(
+            f"{MISSING_CONTENT_BLOCKER} Missing content for: {', '.join(missing_bodies[:12])}"
+            + ("…" if len(missing_bodies) > 12 else "")
+        )
+
+    ac_total = len(requirements.get("acceptanceCriteria", []))
+    mapped = len(plan.get("acceptanceMappings") or req_map.get("acceptanceMappings") or [])
+    unmapped = [] if (not ac_total or mapped >= ac_total) else [f"Unmapped AC count: {ac_total - mapped}"]
+    required = unmapped + list(blockers)
+    return {
+        "verdict": "revise" if required else "pass",
+        "coverage": {"acTotal": ac_total, "acCovered": mapped, "gaps": unmapped},
+        "risks": risks,
+        "blockers": blockers,
+        "requiredPlanChanges": required,
+        "missingContentPaths": missing_bodies,
+        "validationPlan": plan.get("validationPlan") or {},
+    }
+
+
 def _derive_risks_blockers(
     req_map: dict[str, Any],
     api_resolution: dict[str, Any],
@@ -266,7 +399,7 @@ def _derive_risks_blockers(
     if req_map.get("weakGraph"):
         risks.append("Graphify evidence is thin — file targets may need human confirmation.")
     if not modify and not create:
-        blockers.append("Plan has no create/modify files — nothing to implement.")
+        blockers.append(EMPTY_PLAN_BLOCKER)
     readme_only = modify and all(Path(f.get("path", "")).name.lower() == "readme.md" for f in modify)
     if readme_only and req_map.get("surface") in (None, "ui_only"):
         risks.append(
@@ -393,14 +526,32 @@ def build_plan_approval_package(run_dir: Path, plan: dict[str, Any] | None = Non
         "topology": plan.get("topology") or understanding.get("topology") or {},
         "scope": understanding.get("scope") or {},
         "acceptanceCriteria": understanding.get("acceptanceCriteria") or [],
-        "filesToCreate": [{"path": f.get("path"), "purpose": f.get("purpose"), "root": f.get("root", "default")} for f in create],
-        "filesToModify": [{"path": f.get("path"), "purpose": f.get("purpose"), "root": f.get("root", "default")} for f in modify],
+        "filesToCreate": [
+            {
+                "path": f.get("path"),
+                "purpose": f.get("purpose"),
+                "root": f.get("root", "default"),
+                "hasContent": action_has_writable_body(f),
+            }
+            for f in create
+        ],
+        "filesToModify": [
+            {
+                "path": f.get("path"),
+                "purpose": f.get("purpose"),
+                "root": f.get("root", "default"),
+                "hasContent": action_has_writable_body(f),
+            }
+            for f in modify
+        ],
         "executionOrder": plan.get("executionOrder") or [],
         "acceptanceMappings": plan.get("acceptanceMappings") or [],
         "sourceOfTruth": sot,
         "visualCompliance": visual,
         "risks": plan.get("risks") or review.get("risks") or [],
         "blockers": plan.get("blockers") or [],
+        "missingContentPaths": plan_actions_missing_content(plan),
+        "implementable": plan_is_implementable(plan),
         "validationPlan": validation,
         "tests": tests,
         "review": {
@@ -533,31 +684,20 @@ def generate_plan(
     if subtask_plan:
         plan["subtaskPlan"] = subtask_plan
     plan = sanitize_plan_targets(plan)
+    # Sanitize can drop all create/modify targets — rebuild review from the
+    # final lists so empty plans cannot force-pass and reach human approval.
+    review = build_plan_review(
+        plan,
+        requirements=requirements,
+        req_map=req_map,
+        api_resolution=api_resolution,
+    )
+    plan["risks"] = review["risks"]
+    plan["blockers"] = review["blockers"]
 
     (run_dir / "plans" / "implementation-plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
     md = _plan_markdown(plan)
     (run_dir / "plans" / "implementation-plan.md").write_text(md, encoding="utf-8")
-
-    ac_total = len(requirements.get("acceptanceCriteria", []))
-    mapped = len(req_map.get("acceptanceMappings", []))
-    gaps = [] if mapped >= ac_total else [f"Unmapped AC count: {ac_total - mapped}"]
-    if blockers:
-        gaps.extend(blockers)
-
-    review = {
-        "verdict": "pass" if not gaps else "revise",
-        "coverage": {"acTotal": ac_total, "acCovered": mapped, "gaps": [g for g in gaps if g.startswith("Unmapped")]},
-        "risks": risks,
-        "blockers": blockers,
-        "requiredPlanChanges": [g for g in gaps if g.startswith("Unmapped")],
-        "validationPlan": validation,
-    }
-    # Soft risks (README-only) should not hard-block Gate 3 — human decides at approval.
-    if review["requiredPlanChanges"]:
-        review["verdict"] = "revise"
-    else:
-        review["verdict"] = "pass"
-
     (run_dir / "plans" / "plan-review.json").write_text(json.dumps(review, indent=2), encoding="utf-8")
     approval = build_plan_approval_package(run_dir, plan)
     (run_dir / "plans" / "plan-approval.json").write_text(json.dumps(approval, indent=2), encoding="utf-8")

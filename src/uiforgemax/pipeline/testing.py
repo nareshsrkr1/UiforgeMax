@@ -316,6 +316,26 @@ def _is_playwright_entry(entry: dict[str, Any], cmd: str) -> bool:
     return "playwright" in cmd.lower()
 
 
+def _append_command_log(run_dir: Path | None, entry: dict[str, Any]) -> None:
+    """Persist full command output for TEST_ENV_RECOVERY (snips hide the real error)."""
+    if run_dir is None:
+        return
+    path = run_dir / "tests" / "command-logs.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    except (OSError, json.JSONDecodeError):
+        existing = []
+    if not isinstance(existing, list):
+        existing = []
+    # Cap stored output so artifacts stay readable but keep the FAIL/Error tail.
+    out = entry.get("output") or ""
+    if len(out) > 20000:
+        entry = {**entry, "output": out[-20000:], "outputTruncated": True}
+    existing.append(entry)
+    path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+
+
 def _run_mediated_commands(
     roots: dict[str, Path],
     generated: dict[str, Any],
@@ -394,6 +414,16 @@ def _run_mediated_commands(
             )
             proc = run_with_timeout(cmd, cwd=cwd, timeout=timeout, env=subprocess_env())
             if proc.timed_out:
+                _append_command_log(
+                    run_dir,
+                    {
+                        "command": cmd,
+                        "cwd": str(cwd),
+                        "returncode": proc.returncode,
+                        "timedOut": True,
+                        "output": ((proc.stdout or "") + "\n" + (proc.stderr or ""))[-20000:],
+                    },
+                )
                 if _is_playwright_entry(entry, cmd) and not entry.get("required", False):
                     failures.append(f"[soft] Playwright timed out: {cmd}")
                 else:
@@ -404,6 +434,16 @@ def _run_mediated_commands(
                 playwright_status["ran"] = True
                 playwright_status["status"] = "ran" if proc.returncode == 0 else "failed"
             out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            _append_command_log(
+                run_dir,
+                {
+                    "command": cmd,
+                    "cwd": str(cwd),
+                    "returncode": proc.returncode,
+                    "timedOut": False,
+                    "output": out[-20000:],
+                },
+            )
             cov = _parse_coverage(cwd, out, summary_glob)
             if cov:
                 coverage = cov
@@ -421,6 +461,10 @@ def _run_mediated_commands(
                         f"{_snip_test_output(out)}"
                     )
         except FileNotFoundError:
+            _append_command_log(
+                run_dir,
+                {"command": cmd, "cwd": str(cwd), "returncode": None, "error": "FileNotFoundError"},
+            )
             if _is_playwright_entry(entry, cmd) and not entry.get("required", False):
                 failures.append(f"[soft] Playwright command not found: {cmd}")
                 playwright_status["status"] = "unavailable"
@@ -442,10 +486,14 @@ _TOOL_MISSING_MARKERS = (
     "unable to find",
     "could not find",
     "no module named",
+    "modulenotfounderror",
     "npm err! missing",
     "error: cannot find module",
+    "cannot find module",
     "cannot find dependency",
     "missing dependency",
+    "could not resolve",
+    "err_module_not_found",
     "'mvn' is not recognized",
     "'gradle' is not recognized",
     "'pytest' is not recognized",
@@ -466,20 +514,34 @@ _ASSERTION_MARKERS = (
 )
 
 
+def _looks_like_missing_dep(blob: str) -> bool:
+    """True for missing packages/modules across JS/Python/etc. (not assertion noise)."""
+    b = (blob or "").lower()
+    if any(m in b for m in _TOOL_MISSING_MARKERS):
+        return True
+    if re.search(r"cannot find module ['\"][^'\"]+['\"]", b):
+        return True
+    if "modulenotfounderror" in b or "err_module_not_found" in b:
+        return True
+    return False
+
+
 def _classify_command_failure(cmd: str, output: str, code: int) -> str:
     blob = (output or "").lower()
+    # Missing modules/peers win even when vitest prints a FAIL summary around them.
+    if _looks_like_missing_dep(blob):
+        return "tool_missing"
     # Prefer test_failed when vitest/jest clearly ran assertions (avoid "not found" false positives).
     if any(m in blob for m in _ASSERTION_MARKERS) or "failed suites" in blob:
-        if "cannot find dependency" in blob or "missing dependency" in blob:
-            return "tool_missing"
         return "test_failed"
-    if any(m in blob for m in _TOOL_MISSING_MARKERS):
-        return "tool_missing"
     # Bare "not found" / "not recognized" only when not an assertion report
     if "not recognized" in blob or re.search(r"\bnot found\b", blob):
         return "tool_missing"
     if code in (127, 9009):  # unix not found / Windows command not found
         return "tool_missing"
+    # Opaque exit-1 with empty capture — treat as env gap so mediation can re-run / install.
+    if code != 0 and not (output or "").strip():
+        return "env"
     return "test_failed"
 
 
@@ -540,7 +602,7 @@ def results_need_env_recovery(results: dict[str, Any]) -> bool:
             continue
         if "[tool_missing]" in s or "[env]" in s or "[timeout]" in s:
             return True
-        if any(m in s for m in _TOOL_MISSING_MARKERS):
+        if _looks_like_missing_dep(s):
             return True
     # No run commands produced and mediation expected tests → env/strategy gap
     if not results.get("commandsRan") and results.get("mediated"):
@@ -601,6 +663,9 @@ def write_env_gap(
         resp.unlink(missing_ok=True)
         req = run_dir / "mediation" / "10_test_TEST_ENV_RECOVERY.request.json"
         req.unlink(missing_ok=True)
+    missing: list[str] = []
+    for rf in (facts.get("roots") or {}).values():
+        missing.extend(rf.get("missingPackages") or [])
     gap = {
         "status": "needs_recovery",
         "attempt": attempt,
@@ -610,11 +675,14 @@ def write_env_gap(
         "priorRun": generated.get("run") or [],
         "mode": results.get("mode"),
         "toolchainFacts": "tests/toolchain-facts.json",
+        "commandLogs": "tests/command-logs.json",
         "needInstallAny": bool(facts.get("needInstallAny")),
+        "missingPackages": sorted(set(missing)),
         "note": (
-            "IDE must decide recovery steps from tests/toolchain-facts.json: "
-            "installHints[] when needInstall, correct run[] for hoisted runners, "
-            "or skipTests with reason. Empty installHints while needInstallAny=true is rejected."
+            "IDE must decide recovery from tests/toolchain-facts.json + tests/command-logs.json. "
+            "Cannot find module / missingPackages → installHints for those packages (any stack: "
+            "npm/pnpm/pip/mvn/…). Prefer install + corrected run[] over skipTests. "
+            "Empty installHints while needInstallAny/missingPackages is rejected."
         ),
     }
     path = env_gap_path(run_dir)
@@ -625,26 +693,44 @@ def write_env_gap(
 
 def validate_test_env_recovery(run_dir: Path, payload: dict[str, Any]) -> tuple[bool, str]:
     """Reject recovery that ignores toolchain facts (e.g. skipped install when needed)."""
+    facts = load_toolchain_facts(run_dir)
+    gap = load_env_gap(run_dir)
+    hints = payload.get("installHints") or []
+    run = payload.get("run") or []
+    missing: list[str] = list(gap.get("missingPackages") or [])
+    for rf in (facts.get("roots") or {}).values():
+        missing.extend(rf.get("missingPackages") or [])
+    missing = sorted({m for m in missing if m})
+    fail_blob = " ".join(str(f) for f in (gap.get("failures") or [])).lower()
+    module_gap = bool(missing) or _looks_like_missing_dep(fail_blob)
+
     if payload.get("skipTests"):
         if not (payload.get("skipReason") or "").strip():
             return False, "skipTests requires skipReason"
+        # Do not allow skip as the first response to a clear missing-package failure.
+        if module_gap and not hints:
+            return (
+                False,
+                "failures look like missing packages/modules "
+                f"(missingPackages={missing or 'see command-logs'}). "
+                "Return installHints[] for those packages (e.g. npm install -D @testing-library/dom) "
+                "and a run[] retry — do not skipTests until install was attempted.",
+            )
         return True, ""
 
-    facts = load_toolchain_facts(run_dir)
-    hints = payload.get("installHints") or []
-    run = payload.get("run") or []
     if not run and not hints:
         return False, "provide run[] and/or installHints[], or skipTests"
 
-    if facts.get("needInstallAny") and not hints:
+    if (facts.get("needInstallAny") or missing) and not hints:
         suggested = []
         for rf in (facts.get("roots") or {}).values():
             if rf.get("suggestedInstall"):
                 suggested.append(rf["suggestedInstall"])
         return (
             False,
-            "toolchain-facts.json needInstallAny=true — installHints[] is required "
-            f"(suggested: {json.dumps(suggested)}). MCP executes those installs; do not skip them.",
+            "toolchain-facts.json needInstallAny/missingPackages — installHints[] is required "
+            f"(missing={missing}; suggested: {json.dumps(suggested)}). "
+            "MCP executes those installs; do not skip them.",
         )
 
     # Reject app-local vitest paths when runner is hoisted

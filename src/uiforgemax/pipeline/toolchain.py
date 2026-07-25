@@ -69,6 +69,8 @@ def run_with_timeout(
         cwd=cwd,
         shell=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",  # Windows/vitest ANSI must not wipe captured output
         stdin=subprocess.DEVNULL,  # never inherit the MCP server's JSON-RPC stdin
         # pipe — npm/node reading stdin for any reason (a prompt, a postinstall
         # script waiting on input) must get instant EOF, not hang forever on a
@@ -285,6 +287,52 @@ def runner_packages_for_stack(stack: dict[str, Any] | None) -> list[str]:
     return []
 
 
+# Peer / transitive packages commonly required by generated DOM tests but not
+# always installed with the top-level library (npm peerDeps). Stack-agnostic:
+# only applied when the generated test content imports the parent package.
+_JS_PEER_DEPS: dict[str, list[str]] = {
+    "@testing-library/react": ["@testing-library/dom"],
+    "@testing-library/vue": ["@testing-library/dom"],
+    "@testing-library/svelte": ["@testing-library/dom"],
+    "@testing-library/angular": ["@testing-library/dom"],
+    "@vue/test-utils": ["vue"],
+}
+
+_IMPORT_SPEC_RE = re.compile(
+    r"""(?:from|import)\s+['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\)"""
+)
+
+
+def _npm_package_name(spec: str) -> str | None:
+    """Map an import specifier to an npm package name (ignore relative paths)."""
+    s = (spec or "").strip()
+    if not s or s.startswith(".") or s.startswith("/") or s.startswith("node:"):
+        return None
+    if s.startswith("@"):
+        parts = s.split("/")
+        return "/".join(parts[:2]) if len(parts) >= 2 else s
+    return s.split("/")[0]
+
+
+def packages_implied_by_generated_tests(generated: dict[str, Any] | None) -> list[str]:
+    """Packages implied by mediated test imports + known peers (any UI framework)."""
+    pkgs: list[str] = []
+    seen: set[str] = set()
+    for t in (generated or {}).get("tests") or []:
+        content = t.get("content") or ""
+        for m in _IMPORT_SPEC_RE.finditer(content):
+            pkg = _npm_package_name(m.group(1) or m.group(2) or "")
+            if not pkg or pkg in seen:
+                continue
+            seen.add(pkg)
+            pkgs.append(pkg)
+            for peer in _JS_PEER_DEPS.get(pkg, []):
+                if peer not in seen:
+                    seen.add(peer)
+                    pkgs.append(peer)
+    return pkgs
+
+
 def collect_toolchain_facts(
     roots: dict[str, Path],
     generated: dict[str, Any] | None = None,
@@ -292,7 +340,9 @@ def collect_toolchain_facts(
     """Facts for TEST_ENV_RECOVERY mediation — model decides install/run from this, not guesses."""
     generated = generated or {}
     stack = generated.get("stack") or {}
-    need_pkgs = runner_packages_for_stack(stack)
+    runner_pkgs = runner_packages_for_stack(stack)
+    import_pkgs = packages_implied_by_generated_tests(generated)
+    need_pkgs = list(dict.fromkeys([*runner_pkgs, *import_pkgs]))
     node = resolve_node()
     npm = resolve_npm()
     root_facts: dict[str, Any] = {}
@@ -306,16 +356,28 @@ def collect_toolchain_facts(
         else:
             install_rel = None
 
-        runner_at_root = all(package_installed(root, p) for p in need_pkgs) if need_pkgs else js_deps_ready(root)
+        check_root = install_root or root
+        missing_pkgs = [p for p in need_pkgs if not package_installed(check_root, p)]
+        # Also treat as missing when only present neither at install nor app root.
+        if install_root and install_root != root:
+            missing_pkgs = [
+                p
+                for p in need_pkgs
+                if not package_installed(install_root, p) and not package_installed(root, p)
+            ]
+
+        runner_at_root = (
+            all(package_installed(root, p) for p in runner_pkgs) if runner_pkgs else js_deps_ready(root)
+        )
         runner_at_install = (
-            all(package_installed(install_root, p) for p in need_pkgs)
-            if install_root and need_pkgs
+            all(package_installed(install_root, p) for p in runner_pkgs)
+            if install_root and runner_pkgs
             else (js_deps_ready(install_root) if install_root else False)
         )
-        need_install = bool(install_root) and not runner_at_install
+        need_install = bool(missing_pkgs) or (bool(install_root) and bool(runner_pkgs) and not runner_at_install)
         runner_path = None
-        if need_pkgs and install_root:
-            for p in need_pkgs:
+        if runner_pkgs and install_root:
+            for p in runner_pkgs:
                 for cand in (
                     install_root / "node_modules" / p / f"{p}.mjs",
                     install_root / "node_modules" / p / "vitest.mjs",
@@ -324,29 +386,41 @@ def collect_toolchain_facts(
                     if cand.exists():
                         runner_path = str(cand)
                         break
+        if need_install and missing_pkgs:
+            suggested_cmd = f"npm install -D {' '.join(missing_pkgs)}"
+            purpose = f"Install missing test packages: {', '.join(missing_pkgs)}"
+        elif need_install:
+            suggested_cmd = "npm install"
+            purpose = f"Install deps at JS workspace root so {need_pkgs or ['packages']} resolve"
+        else:
+            suggested_cmd = ""
+            purpose = ""
         root_facts[name] = {
             "path": str(root),
             "jsInstallRoot": str(install_root) if install_root else None,
             "installRootRel": install_rel,
             "nodeModulesAtRoot": (root / "node_modules").is_dir(),
             "nodeModulesAtInstallRoot": bool(install_root and (install_root / "node_modules").is_dir()),
+            "runnerPackages": runner_pkgs,
             "needPackages": need_pkgs,
+            "missingPackages": missing_pkgs,
+            "impliedByTests": import_pkgs,
             "runnerAtRoot": runner_at_root,
             "runnerAtInstallRoot": runner_at_install,
             "hoistedRunner": bool(runner_at_install and not runner_at_root),
             "runnerPath": runner_path,
             "needInstall": need_install,
             "avoidLocalRunnerPath": (
-                [f"./node_modules/{p}" for p in need_pkgs]
+                [f"./node_modules/{p}" for p in runner_pkgs]
                 if runner_at_install and not runner_at_root
                 else []
             ),
             "suggestedInstall": (
                 {
-                    "command": "npm install" if npm else "npm install",
+                    "command": suggested_cmd,
                     "cwd": install_rel or ".",
                     "root": name,
-                    "purpose": f"Install deps at JS workspace root so {need_pkgs or ['packages']} resolve",
+                    "purpose": purpose,
                 }
                 if need_install
                 else None
@@ -356,7 +430,8 @@ def collect_toolchain_facts(
                 "under the app root. Prefer installHints at installRootRel, then npm exec / npx from app, "
                 "or node <runnerPath> with cwd at install root."
                 if install_root and install_root != root
-                else "Use installHints when needInstall is true; empty installHints is invalid then."
+                else "Use installHints when needInstall is true; empty installHints is invalid then. "
+                "missingPackages / Cannot find module → install that package, do not skipTests."
             ),
         }
 
@@ -418,13 +493,17 @@ def collect_toolchain_facts(
             "do not require hard-coded tool paths in MCP env. If missingTools is non-empty, "
             "ask the human for that tool's path or installation — do not guess.",
             "If needInstallAny or any root.needInstall is true, installHints[] is REQUIRED (unless skipTests).",
-            "Copy suggestedInstall when present; adjust only if this stack needs a different package manager.",
-            "run[] must use a runner that exists after install (npm exec vitest, or node runnerPath).",
+            "If missingPackages is non-empty OR failures say Cannot find module / ModuleNotFoundError / "
+            "No module named — installHints for those packages is REQUIRED; do not skipTests.",
+            "Copy suggestedInstall when present; adjust only if this stack needs a different package manager "
+            "(npm/pnpm/yarn/pip/poetry/mvn/gradle/dotnet/go — whichever this repo uses).",
+            "run[] must use a runner that exists after install (npm exec <runner>, or node runnerPath, "
+            "pytest, mvn test, go test, etc. — match the stack).",
             "Never claim node_modules is ready when runnerAtInstallRoot is false.",
             "If hoistedRunner is true, do NOT run node ./node_modules/<runner> under the app cwd.",
             "For UI tickets with visual ACs: include appropriate DOM/component tests for the detected "
-            "framework (Testing Library for React, ComponentFixture for Angular, @vue/test-utils for Vue, "
-            "etc.) AND Playwright e2e when visual proof is needed. Mark Playwright run[] with "
+            "framework (Testing Library for React/Vue/Svelte, TestBed for Angular, etc.) AND Playwright "
+            "e2e when visual proof is needed. Mark Playwright run[] with "
             "suite='playwright' (optional). MCP tries one project-local install; if Playwright stays "
             "unavailable, those commands are soft-skipped — unit/DOM still decide pass.",
         ],
