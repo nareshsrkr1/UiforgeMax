@@ -262,6 +262,33 @@ MISSING_INTENT_BLOCKER = (
 # Deprecated alias — intent-only plans no longer require mediated `content`.
 MISSING_CONTENT_BLOCKER = MISSING_INTENT_BLOCKER
 
+
+def load_locked_plan(run_dir: Path, *, require_approved: bool = False) -> dict[str, Any]:
+    """Load the plan that implement / IDE-apply must follow.
+
+    After human approval, **only** ``plans/approved-plan.json`` is authoritative.
+    The draft ``implementation-plan.json`` may still change via mediation and must
+    not silently override what the human approved.
+    """
+    approved = run_dir / "plans" / "approved-plan.json"
+    draft = run_dir / "plans" / "implementation-plan.json"
+    path: Path | None = None
+    if require_approved or approved.exists():
+        if not approved.exists():
+            if require_approved:
+                return {}
+        else:
+            path = approved
+    if path is None and draft.exists():
+        path = draft
+    if path is None:
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
 # Scaffold / legacy writers that can produce bytes without mediated `content`.
 _WRITABLE_WITHOUT_CONTENT_TEMPLATES = frozenset(
     {

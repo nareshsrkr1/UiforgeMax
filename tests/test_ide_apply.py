@@ -64,6 +64,32 @@ def test_failed_empty_plan_is_not_resurrected_to_ide_apply(tmp_path: Path):
     assert out.get("waitForIdeApply") is not True
 
 
+def test_post_approval_targets_approved_plan_only(tmp_path: Path):
+    """After freeze, draft mutations must not change IDE-apply / implement targets."""
+    from uiforgemax.pipeline.planning import load_locked_plan
+
+    run_dir = tmp_path / "run"
+    (run_dir / "plans").mkdir(parents=True)
+    approved = {
+        "create": [{"path": "approved.ts", "purpose": "keep"}],
+        "modify": [],
+    }
+    draft = {
+        "create": [{"path": "drifted.ts", "purpose": "should not win"}],
+        "modify": [{"path": "extra.ts", "purpose": "no"}],
+    }
+    (run_dir / "plans" / "approved-plan.json").write_text(json.dumps(approved), encoding="utf-8")
+    (run_dir / "plans" / "implementation-plan.json").write_text(json.dumps(draft), encoding="utf-8")
+
+    locked = load_locked_plan(run_dir, require_approved=True)
+    assert [a["path"] for a in locked.get("create") or []] == ["approved.ts"]
+    assert locked.get("modify") == []
+
+    brief = ide_apply_brief(locked)
+    assert brief["filesToCreate"][0]["path"] == "approved.ts"
+    assert all(f["path"] != "drifted.ts" for f in brief["filesToCreate"])
+
+
 def test_ide_apply_no_progress_circuit_breaker(tmp_path: Path):
     """N blind advances with unchanged incompletePaths → BLOCKED."""
     import os

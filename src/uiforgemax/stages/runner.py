@@ -32,6 +32,7 @@ from uiforgemax.pipeline.planning import (
     build_understanding_approval_package,
     generate_plan,
     generate_understanding,
+    load_locked_plan,
 )
 from uiforgemax.pipeline.surface_scope import apply_surface_to_api_resolution, apply_surface_to_requirement_map
 from uiforgemax.pipeline.testing import apply_generated_tests, run_tests
@@ -785,10 +786,16 @@ def _gate_plan(ctx: ToolContext, state: RunState) -> StageResult:
         )
     # Already approved — either IDE-apply pause or MCP scaffold write.
     if state.status == Status.AWAITING_IDE_APPLY:
+        locked = load_locked_plan(run_dir, require_approved=True) or plan
         return StageResult(
             stop=True,
-            message="Awaiting IDE apply — edit plan paths, then advance.",
-            extra={"ideApplyBrief": ide_apply_brief(plan), "waitForIdeApply": True},
+            message="Awaiting IDE apply — edit approved-plan.json paths only, then advance.",
+            extra={
+                "ideApplyBrief": ide_apply_brief(locked),
+                "waitForIdeApply": True,
+                "planSource": "plans/approved-plan.json",
+                "doNotAdvanceUntilEdited": True,
+            },
         )
     return StageResult(stop=False, message="Plan approved — continuing to implement/verify.")
 
@@ -922,10 +929,28 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
             message="Post-implement review passed — continuing.",
         )
 
-    # Prefer the frozen snapshot from approve_plan so mediation cannot drift the plan.
+    # After approval, ONLY approved-plan.json is authoritative (never draft).
     approved_path = run_dir / "plans" / "approved-plan.json"
-    plan_path = approved_path if approved_path.exists() else run_dir / "plans" / "implementation-plan.json"
-    plan = _load_json(plan_path)
+    if state.approvals.plan.approved:
+        if not approved_path.exists():
+            state.status = Status.BLOCKED
+            state.record(Stage.IMPLEMENT, "blocked", "missing approved-plan.json")
+            return StageResult(
+                stop=True,
+                message=(
+                    "BLOCKED: plan is approved but plans/approved-plan.json is missing. "
+                    "Re-approve the plan or request_changes — refuse to implement from a draft."
+                ),
+            )
+        plan = load_locked_plan(run_dir, require_approved=True)
+        plan_path = approved_path
+    else:
+        plan_path = (
+            approved_path
+            if approved_path.exists()
+            else run_dir / "plans" / "implementation-plan.json"
+        )
+        plan = _load_json(plan_path)
     subtasks = load_subtasks(run_dir)
     expected = len(plan.get("create") or []) + len(plan.get("modify") or [])
     mcp_plan, ide_plan = partition_mcp_writable(plan)
@@ -1141,9 +1166,10 @@ def _test(ctx: ToolContext, state: RunState) -> StageResult:
     if pause:
         return pause
 
-    approved = run_dir / "plans" / "approved-plan.json"
-    plan_path = approved if approved.exists() else run_dir / "plans" / "implementation-plan.json"
-    plan = _load_json(plan_path)
+    # Tests must cover the locked approved plan when present.
+    plan = load_locked_plan(run_dir, require_approved=bool(state.approvals.plan.approved))
+    if not plan:
+        plan = _load_json(run_dir / "plans" / "implementation-plan.json")
     written = apply_generated_tests(roots, run_dir)
 
     # After an install timeout, next advance skips auto-install and re-runs tests only.

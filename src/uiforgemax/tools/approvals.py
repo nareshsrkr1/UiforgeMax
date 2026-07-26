@@ -97,6 +97,7 @@ def approve_plan(ctx: ToolContext, run_id: str, by: str = "user") -> str:
     from uiforgemax.pipeline.planning import (
         EMPTY_PLAN_BLOCKER,
         MISSING_INTENT_BLOCKER,
+        load_locked_plan,
         plan_actions_missing_intent,
         plan_all_mcp_writable,
         plan_has_file_actions,
@@ -137,6 +138,8 @@ def approve_plan(ctx: ToolContext, run_id: str, by: str = "user") -> str:
             stop=True,
         )
     _freeze_approved_plan(run_dir)
+    # Brief/baseline from the frozen snapshot only — never a later draft mutation.
+    locked = load_locked_plan(run_dir, require_approved=True) or plan
     state.approvals.plan.approved = True
     state.approvals.plan.at = _now()
     state.approvals.plan.by = by
@@ -144,9 +147,9 @@ def approve_plan(ctx: ToolContext, run_id: str, by: str = "user") -> str:
     state.approvals.understanding.required = False
     state.current_stage = Stage.IMPLEMENT
     state.artifacts["approvedPlan"] = "plans/approved-plan.json"
-    brief = ide_apply_brief(plan)
-    # Scaffold-only plans (all templateId/content) can still be MCP-written on advance.
-    if plan_all_mcp_writable(plan):
+    brief = ide_apply_brief(locked)
+    # Scaffold-only plans (known templateId/patchId) can still be MCP-written on advance.
+    if plan_all_mcp_writable(locked):
         state.status = Status.PLAN_REVIEWED
         state.record(Stage.GATE_PLAN, "approved", by)
         ctx.store.save(state)
@@ -154,7 +157,11 @@ def approve_plan(ctx: ToolContext, run_id: str, by: str = "user") -> str:
             state,
             "Plan approved and locked (scaffold/MCP-writable). "
             "Call uiforgemax_advance to let MCP write template content.",
-            extra={"ideApplyBrief": brief, "mcpWritableScaffold": True},
+            extra={
+                "ideApplyBrief": brief,
+                "mcpWritableScaffold": True,
+                "planSource": "plans/approved-plan.json",
+            },
         )
 
     roots: dict[str, Path] = {}
@@ -162,7 +169,7 @@ def approve_plan(ctx: ToolContext, run_id: str, by: str = "user") -> str:
         roots["default"] = Path(state.project_root)
     for name, path in (state.project_roots or {}).items():
         roots[str(name)] = Path(path)
-    write_pre_apply_baseline(run_dir, roots, plan)
+    write_pre_apply_baseline(run_dir, roots, locked)
     state.status = Status.AWAITING_IDE_APPLY
     state.artifacts["ideApply"] = True
     state.artifacts["preApplyBaseline"] = "plans/pre-apply-baseline.json"
@@ -170,10 +177,16 @@ def approve_plan(ctx: ToolContext, run_id: str, by: str = "user") -> str:
     ctx.store.save(state)
     return tool_response(
         state,
-        "Plan approved and locked. Implement with IDE Read/Edit/Write on the listed "
-        "paths, then call uiforgemax_advance to verify — do not push file bodies via MCP.",
+        "Plan approved and locked (plans/approved-plan.json). "
+        "Implement ONLY those create/modify paths with IDE Read/Edit/Write, then "
+        "uiforgemax_advance to verify — do not invent extra files or push bodies via MCP.",
         stop=True,
-        extra={"ideApplyBrief": brief, "waitForIdeApply": True},
+        extra={
+            "ideApplyBrief": brief,
+            "waitForIdeApply": True,
+            "planSource": "plans/approved-plan.json",
+            "doNotAdvanceUntilEdited": True,
+        },
     )
 
 

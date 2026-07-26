@@ -36,33 +36,30 @@ def advance(ctx: ToolContext, run_id: str) -> str:
         # Recover FAILED partial-implement into IDE apply instead of dead-ending.
         # Do not resurrect empty-plan failures (nothing to edit).
         if state.status == Status.FAILED and state.current_stage == Stage.IMPLEMENT:
+            from uiforgemax.pipeline.planning import load_locked_plan
+
             run_dir = ctx.store.run_dir(run_id)
-            plan_path = run_dir / "plans" / "approved-plan.json"
-            if not plan_path.exists():
-                plan_path = run_dir / "plans" / "implementation-plan.json"
-            if plan_path.exists():
-                try:
-                    plan = json.loads(plan_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    plan = {}
-                if plan_file_action_count(plan) > 0:
-                    state.status = Status.AWAITING_IDE_APPLY
-                    state.artifacts["ideApply"] = True
-                    state.artifacts.pop("ideApplyNoProgress", None)
-                    state.current_stage = Stage.IMPLEMENT
-                    ctx.store.save(state)
-                    return tool_response(
-                        state,
-                        "Recovered from FAILED implement — IDE apply required. "
-                        "Edit ideApplyBrief paths with IDE tools, then call "
-                        "uiforgemax_advance once.",
-                        stop=True,
-                        extra={
-                            "ideApplyBrief": ide_apply_brief(plan),
-                            "waitForIdeApply": True,
-                            "doNotAdvanceUntilEdited": True,
-                        },
-                    )
+            # Recover only from the frozen approved plan — never a drifted draft.
+            plan = load_locked_plan(run_dir, require_approved=True)
+            if plan_file_action_count(plan) > 0:
+                state.status = Status.AWAITING_IDE_APPLY
+                state.artifacts["ideApply"] = True
+                state.artifacts.pop("ideApplyNoProgress", None)
+                state.current_stage = Stage.IMPLEMENT
+                ctx.store.save(state)
+                return tool_response(
+                    state,
+                    "Recovered from FAILED implement — IDE apply required on "
+                    "plans/approved-plan.json paths only. Edit those files, then "
+                    "call uiforgemax_advance once.",
+                    stop=True,
+                    extra={
+                        "ideApplyBrief": ide_apply_brief(plan),
+                        "waitForIdeApply": True,
+                        "doNotAdvanceUntilEdited": True,
+                        "planSource": "plans/approved-plan.json",
+                    },
+                )
         return tool_response(state, f"Run terminal ({state.status.value}).", stop=True)
 
     run_dir = ctx.store.run_dir(run_id)

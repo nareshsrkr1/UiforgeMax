@@ -484,18 +484,16 @@ def get_run_status(ctx: ToolContext, run_id: str) -> str:
         extra.update(mediation_extra(ctx, state, full=True))
     if state.status == Status.AWAITING_IDE_APPLY:
         from uiforgemax.pipeline.ide_apply import ide_apply_brief
+        from uiforgemax.pipeline.planning import load_locked_plan
 
-        plan_path = run_path / "plans" / "approved-plan.json"
-        if not plan_path.exists():
-            plan_path = run_path / "plans" / "implementation-plan.json"
-        plan = {}
-        if plan_path.exists():
-            try:
-                plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                plan = {}
+        plan = load_locked_plan(run_path, require_approved=bool(state.approvals.plan.approved))
         extra["ideApplyBrief"] = ide_apply_brief(plan)
         extra["waitForIdeApply"] = True
+        extra["planSource"] = (
+            "plans/approved-plan.json"
+            if (run_path / "plans" / "approved-plan.json").exists()
+            else "plans/implementation-plan.json"
+        )
     msg = (
         f"status={state.status.value} stage={state.current_stage.value} "
         f"runId={state.run_id}"
