@@ -984,6 +984,7 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
         count = int(summary.get("fileCount") or 0)
         state.status = Status.IMPLEMENTING
         state.artifacts.pop("ideApply", None)
+        state.artifacts.pop("ideApplyNoProgress", None)
         state.record(Stage.IMPLEMENT, "ok", f"ide_apply verified {count} files")
         msg = f"IDE apply verified {count} file(s)."
         pause = _maybe_pause_mediation(ctx, state, Stage.IMPLEMENT)
