@@ -946,12 +946,11 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
                 mcp_summary = apply_plan(roots, mcp_plan, subtasks=None)
                 mcp_changed = list(mcp_summary.get("filesChanged") or [])
             except PartialImplementError as exc:
-                return StageResult(
-                    stop=True,
-                    message=(
-                        f"IMPLEMENT FAILED: scaffold write partial — skipped "
-                        f"{[s['path'] for s in exc.skipped]}."
-                    ),
+                # Scaffold failure must not kill the run — continue IDE verify for the rest.
+                state.record(
+                    Stage.IMPLEMENT,
+                    "scaffold_partial",
+                    str([s.get("path") for s in exc.skipped])[:200],
                 )
         summary, problems = verify_ide_apply(roots, ide_plan if ide_expected else plan, baseline)
         summary["filesChanged"] = list(dict.fromkeys(mcp_changed + list(summary.get("filesChanged") or [])))
@@ -963,17 +962,21 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
         state.artifacts["diffSummary"] = "implementation/diff-summary.json"
         if problems:
             state.status = Status.AWAITING_IDE_APPLY
+            state.artifacts["ideApply"] = True
             state.record(Stage.IMPLEMENT, "blocked", f"ide_apply incomplete: {problems[:8]}")
             return StageResult(
                 stop=True,
                 message=(
-                    "IDE APPLY INCOMPLETE — these planned paths are missing or unchanged: "
+                    "IDE APPLY INCOMPLETE — do NOT advance again yet. "
+                    "These planned paths are missing or unchanged on disk: "
                     f"{', '.join(problems[:12])}{'…' if len(problems) > 12 else ''}. "
-                    "Edit them with IDE Read/Edit/Write, then call uiforgemax_advance again."
+                    "Use IDE Read/Edit/Write on EACH path (project_root), THEN "
+                    "call uiforgemax_advance once to verify."
                 ),
                 extra={
                     "ideApplyBrief": ide_apply_brief(plan),
                     "waitForIdeApply": True,
+                    "doNotAdvanceUntilEdited": True,
                     "incompletePaths": problems,
                     "diffSummary": summary,
                 },
@@ -1014,42 +1017,27 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
                 json.dumps(partial_summary, indent=2), encoding="utf-8"
             )
             state.artifacts["diffSummary"] = "implementation/diff-summary.json"
-            # Intent leftovers → switch to IDE apply instead of hard-fail.
-            if ide_expected > 0 or any(
-                "content" in str(s.get("reason", "")).lower()
-                or "no writer" in str(s.get("reason", "")).lower()
-                for s in exc.skipped
-            ):
-                write_pre_apply_baseline(run_dir, roots, plan)
-                state.status = Status.AWAITING_IDE_APPLY
-                state.artifacts["ideApply"] = True
-                state.record(Stage.IMPLEMENT, "awaiting_ide_apply", str(exc.skipped)[:200])
-                return StageResult(
-                    stop=True,
-                    message=(
-                        "MCP could not write all planned files (intent-only plan). "
-                        "Edit the listed paths with IDE tools, then uiforgemax_advance."
-                    ),
-                    extra={
-                        "ideApplyBrief": ide_apply_brief(plan),
-                        "waitForIdeApply": True,
-                        "skippedPaths": [s["path"] for s in exc.skipped],
-                    },
-                )
-            state.status = Status.FAILED
+            # Never hard-FAIL on partial MCP write — always hand off to IDE apply.
+            write_pre_apply_baseline(run_dir, roots, plan)
+            state.status = Status.AWAITING_IDE_APPLY
+            state.artifacts["ideApply"] = True
             skipped_paths = [s["path"] for s in exc.skipped]
-            state.record(
-                Stage.IMPLEMENT,
-                "failed",
-                f"partial: {len(exc.changed)} written, {len(exc.skipped)} skipped={skipped_paths}",
-            )
+            state.record(Stage.IMPLEMENT, "awaiting_ide_apply", str(skipped_paths)[:200])
             return StageResult(
                 stop=True,
                 message=(
-                    f"IMPLEMENT FAILED (partial): {len(exc.changed)} written, "
-                    f"{len(exc.skipped)} skipped: {skipped_paths}."
+                    "MCP could not write all planned files (expected for intent-only plans). "
+                    "Do NOT loop advance/resume. Edit these paths with IDE Read/Edit/Write, "
+                    f"then call uiforgemax_advance once: {', '.join(skipped_paths[:12])}"
+                    f"{'…' if len(skipped_paths) > 12 else ''}."
                 ),
-                extra={"diffSummary": partial_summary, "partialFail": True},
+                extra={
+                    "ideApplyBrief": ide_apply_brief(plan),
+                    "waitForIdeApply": True,
+                    "doNotAdvanceUntilEdited": True,
+                    "skippedPaths": skipped_paths,
+                    "diffSummary": partial_summary,
+                },
             )
 
         t.stats = {

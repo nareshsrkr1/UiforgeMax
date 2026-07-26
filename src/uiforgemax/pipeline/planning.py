@@ -305,16 +305,14 @@ def plan_file_action_count(plan: dict[str, Any] | None) -> int:
     return len(plan.get("create") or []) + len(plan.get("modify") or [])
 
 
-def action_has_writable_body(action: dict[str, Any] | None) -> bool:
-    """True when MCP can still write this action (scaffold/template or mediated body).
+def action_is_mcp_scaffold(action: dict[str, Any] | None) -> bool:
+    """True when MCP may write via known greenfield templateId / legacy patchId.
 
-    Intent-only plans typically return False — the IDE agent writes those files.
+    Mediated ``content`` is NOT MCP-writable anymore — that caused partial-implement
+    loops when agents still embedded bodies. IDE apply handles product files.
     """
     if not action:
         return False
-    content = action.get("content")
-    if content is not None and str(content).strip() != "":
-        return True
     tid = str(action.get("templateId") or "")
     if tid in _WRITABLE_WITHOUT_CONTENT_TEMPLATES or tid.startswith("greenfield."):
         return True
@@ -322,6 +320,19 @@ def action_has_writable_body(action: dict[str, Any] | None) -> bool:
     if pid in _WRITABLE_WITHOUT_CONTENT_PATCHES:
         return True
     return False
+
+
+def action_has_writable_body(action: dict[str, Any] | None) -> bool:
+    """Compat: scaffold OR non-empty content (diagnostics only).
+
+    Prefer ``action_is_mcp_scaffold`` for implement routing.
+    """
+    if not action:
+        return False
+    if action_is_mcp_scaffold(action):
+        return True
+    content = action.get("content")
+    return content is not None and str(content).strip() != ""
 
 
 def action_has_intent(action: dict[str, Any] | None) -> bool:
@@ -345,15 +356,12 @@ def plan_actions_missing_intent(plan: dict[str, Any] | None) -> list[str]:
 
 
 def plan_actions_missing_content(plan: dict[str, Any] | None) -> list[str]:
-    """Paths MCP cannot write itself (no content/template) — IDE apply handles these.
-
-    Kept for diagnostics / scaffold detection; no longer a hard plan-gate blocker.
-    """
+    """Paths that are not MCP scaffolds (IDE apply). Kept for diagnostics."""
     if not plan:
         return []
     missing: list[str] = []
     for action in list(plan.get("create") or []) + list(plan.get("modify") or []):
-        if not action_has_writable_body(action):
+        if not action_is_mcp_scaffold(action):
             missing.append(str(action.get("path") or "?"))
     return missing
 
@@ -364,8 +372,11 @@ def plan_is_implementable(plan: dict[str, Any] | None) -> bool:
 
 
 def plan_all_mcp_writable(plan: dict[str, Any] | None) -> bool:
-    """True when every action has content/template — MCP may write without IDE apply."""
-    return plan_has_file_actions(plan) and not plan_actions_missing_content(plan)
+    """True when every action is a known scaffold template/patch — rare greenfield path."""
+    if not plan_has_file_actions(plan):
+        return False
+    actions = list(plan.get("create") or []) + list(plan.get("modify") or [])
+    return bool(actions) and all(action_is_mcp_scaffold(a) for a in actions)
 
 
 def _normalize_for_diff(text: str) -> str:

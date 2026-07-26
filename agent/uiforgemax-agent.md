@@ -222,7 +222,9 @@ reactive path is a fallback for the unexpected case, not the normal flow.
 6. At the plan gate, enumerate every path and wait for the human.
 7. At `awaiting_mediation`, use `mediationBrief` + `submit_mediation` (intent JSON only
    for plans). Opaque advance → **get_run_status first**.
-8. At `awaiting_ide_apply`, use `ideApplyBrief` — edit files, then `advance`.
+8. At `awaiting_ide_apply` / `doNotAdvanceUntilEdited`: **STOP calling advance**.
+    Edit every `ideApplyBrief` path with IDE Read/Edit/Write first, then call
+    `advance` **once**. Blind advance/resume causes the partial-implement loop.
 9. Images: `uiforgemax_add_image(run_id, path, role)`.
 10. **Never ask "should I continue?"** — drive until plan gate / IDE apply / BLOCKED.
 11. **No git from MCP.** After files change, the human commits when ready.

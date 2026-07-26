@@ -28,8 +28,10 @@ def _gate_next(
     if status == Status.AWAITING_MEDIATION:
         return "uiforgemax_submit_mediation", ["uiforgemax_get_run_status"], blocked + ["uiforgemax_advance"]
     if status == Status.AWAITING_IDE_APPLY:
-        # Agent edits target files with IDE tools, then advances for verify/gates.
-        return "uiforgemax_advance", ["uiforgemax_get_run_status"], blocked
+        # Do NOT set nextTool=advance — that caused Copilot to advance in a loop
+        # without editing files (partial-implement / IDE-apply incomplete churn).
+        # Agent must edit listed paths first, then choose advance from alternatives.
+        return None, ["uiforgemax_advance", "uiforgemax_get_run_status"], blocked
     if status == Status.AWAITING_USER_INSTALL:
         # Human finishes npm/pip install; agent resumes with advance (tests-only retry).
         return "uiforgemax_advance", ["uiforgemax_resume_run", "uiforgemax_get_run_status"], blocked
@@ -123,14 +125,16 @@ def tool_response(
     if state.status == Status.AWAITING_IDE_APPLY:
         body["ideApply"] = True
         body["waitForIdeApply"] = True
+        body["stopReason"] = "ide_apply_required"
+        body["doNotAdvanceUntilEdited"] = True
         body["resumeHint"] = {
-            "say": "advance after edits",
-            "nextTool": "uiforgemax_advance",
+            "say": "edit files first, then advance",
+            "afterEditsCall": "uiforgemax_advance",
             "runId": state.run_id,
             "stage": "9_implement",
             "note": (
-                "Edit approved plan paths with IDE Read/Edit/Write, then call "
-                "uiforgemax_advance to verify and continue."
+                "STOP advancing. Use IDE Read/Edit/Write on ideApplyBrief paths, "
+                "THEN call uiforgemax_advance once to verify. Blind advance loops forever."
             ),
         }
     if extra:

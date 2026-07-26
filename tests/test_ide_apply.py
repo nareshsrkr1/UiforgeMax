@@ -8,9 +8,10 @@ from pathlib import Path
 from uiforgemax.pipeline.ide_apply import (
     build_pre_apply_baseline,
     ide_apply_brief,
+    partition_mcp_writable,
     verify_ide_apply,
 )
-from uiforgemax.pipeline.planning import plan_is_implementable
+from uiforgemax.pipeline.planning import plan_all_mcp_writable, plan_is_implementable
 
 
 def test_intent_only_plan_is_approvable():
@@ -19,6 +20,18 @@ def test_intent_only_plan_is_approvable():
         "modify": [{"path": "b.ts", "purpose": "tweak", "changeSummary": "rename"}],
     }
     assert plan_is_implementable(plan) is True
+
+
+def test_content_bodies_are_not_mcp_writable():
+    """Embedded content must not route to MCP apply_plan (loop source)."""
+    plan = {
+        "create": [{"path": "a.ts", "purpose": "x", "content": "export const a=1\n"}],
+        "modify": [{"path": "b.ts", "purpose": "y", "content": "export const b=2\n"}],
+    }
+    assert plan_all_mcp_writable(plan) is False
+    mcp, ide = partition_mcp_writable(plan)
+    assert mcp["create"] == [] and mcp["modify"] == []
+    assert len(ide["create"]) == 1 and len(ide["modify"]) == 1
 
 
 def test_verify_ide_apply_detects_create_and_modify(tmp_path: Path):

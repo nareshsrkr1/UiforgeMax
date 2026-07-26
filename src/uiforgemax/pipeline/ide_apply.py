@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from uiforgemax.pipeline.implement import resolve_root
-from uiforgemax.pipeline.planning import action_has_writable_body, plan_all_mcp_writable
+from uiforgemax.pipeline.planning import action_is_mcp_scaffold, plan_all_mcp_writable
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -197,7 +197,7 @@ def partition_mcp_writable(plan: dict[str, Any]) -> tuple[dict[str, Any], dict[s
         "executionOrder": plan.get("executionOrder"),
     }
     for action in plan.get("create") or []:
-        (mcp["create"] if action_has_writable_body(action) else ide["create"]).append(action)
+        (mcp["create"] if action_is_mcp_scaffold(action) else ide["create"]).append(action)
     for action in plan.get("modify") or []:
-        (mcp["modify"] if action_has_writable_body(action) else ide["modify"]).append(action)
+        (mcp["modify"] if action_is_mcp_scaffold(action) else ide["modify"]).append(action)
     return mcp, ide

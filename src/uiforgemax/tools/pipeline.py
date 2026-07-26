@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from uiforgemax.mcp_response import tool_response
 from uiforgemax.pipeline.flow_router import is_stage_active, load_flow, next_active_stage, resolve_flow
+from uiforgemax.pipeline.ide_apply import ide_apply_brief
 from uiforgemax.stages import run_stage
-from uiforgemax.state import Status
+from uiforgemax.state import Stage, Status
 from uiforgemax.tools.context import ToolContext
 from uiforgemax.tools.mediation import mediation_extra
 
@@ -22,7 +23,39 @@ def advance(ctx: ToolContext, run_id: str) -> str:
             stop=True,
             extra=mediation_extra(ctx, state, full=False),
         )
+    if state.status == Status.AWAITING_IDE_APPLY:
+        # Jump straight to implement verify — never re-run earlier stages blind.
+        state.current_stage = Stage.IMPLEMENT
+        ctx.store.save(state)
     if state.status in Status.terminal():
+        # Recover FAILED partial-implement into IDE apply instead of dead-ending.
+        if state.status == Status.FAILED and state.current_stage == Stage.IMPLEMENT:
+            run_dir = ctx.store.run_dir(run_id)
+            plan_path = run_dir / "plans" / "approved-plan.json"
+            if not plan_path.exists():
+                plan_path = run_dir / "plans" / "implementation-plan.json"
+            if plan_path.exists():
+                import json
+
+                try:
+                    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    plan = {}
+                state.status = Status.AWAITING_IDE_APPLY
+                state.artifacts["ideApply"] = True
+                state.current_stage = Stage.IMPLEMENT
+                ctx.store.save(state)
+                return tool_response(
+                    state,
+                    "Recovered from FAILED implement — IDE apply required. "
+                    "Edit ideApplyBrief paths with IDE tools, then call uiforgemax_advance once.",
+                    stop=True,
+                    extra={
+                        "ideApplyBrief": ide_apply_brief(plan),
+                        "waitForIdeApply": True,
+                        "doNotAdvanceUntilEdited": True,
+                    },
+                )
         return tool_response(state, f"Run terminal ({state.status.value}).", stop=True)
 
     run_dir = ctx.store.run_dir(run_id)
