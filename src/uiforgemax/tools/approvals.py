@@ -93,10 +93,12 @@ def approve_understanding(ctx: ToolContext, run_id: str, by: str = "user") -> st
 
 
 def approve_plan(ctx: ToolContext, run_id: str, by: str = "user") -> str:
+    from uiforgemax.pipeline.ide_apply import ide_apply_brief, write_pre_apply_baseline
     from uiforgemax.pipeline.planning import (
         EMPTY_PLAN_BLOCKER,
-        MISSING_CONTENT_BLOCKER,
-        plan_actions_missing_content,
+        MISSING_INTENT_BLOCKER,
+        plan_actions_missing_intent,
+        plan_all_mcp_writable,
         plan_has_file_actions,
         plan_is_implementable,
     )
@@ -123,17 +125,15 @@ def approve_plan(ctx: ToolContext, run_id: str, by: str = "user") -> str:
             stop=True,
         )
     if not plan_is_implementable(plan):
-        missing = plan_actions_missing_content(plan)
+        missing = plan_actions_missing_intent(plan)
         state.status = Status.BLOCKED
-        state.record(Stage.GATE_PLAN, "blocked", MISSING_CONTENT_BLOCKER)
+        state.record(Stage.GATE_PLAN, "blocked", MISSING_INTENT_BLOCKER)
         ctx.store.save(state)
         return tool_response(
             state,
-            f"BLOCKED: {MISSING_CONTENT_BLOCKER} "
-            f"Missing content for: {', '.join(missing[:12])}"
-            f"{'…' if len(missing) > 12 else ''}. "
-            "Do not approve a path-only plan — re-run PLAN_REFINEMENT with full file "
-            "`content` for every create/modify (from graph/source-snapshots.json).",
+            f"BLOCKED: {MISSING_INTENT_BLOCKER} "
+            f"Missing path/purpose for: {', '.join(missing[:12])}"
+            f"{'…' if len(missing) > 12 else ''}.",
             stop=True,
         )
     _freeze_approved_plan(run_dir)
@@ -142,14 +142,38 @@ def approve_plan(ctx: ToolContext, run_id: str, by: str = "user") -> str:
     state.approvals.plan.by = by
     state.approvals.understanding.approved = True
     state.approvals.understanding.required = False
-    state.current_stage = Stage.GATE_PLAN
+    state.current_stage = Stage.IMPLEMENT
     state.artifacts["approvedPlan"] = "plans/approved-plan.json"
-    state.record(Stage.GATE_PLAN, "approved", by)
+    brief = ide_apply_brief(plan)
+    # Scaffold-only plans (all templateId/content) can still be MCP-written on advance.
+    if plan_all_mcp_writable(plan):
+        state.status = Status.PLAN_REVIEWED
+        state.record(Stage.GATE_PLAN, "approved", by)
+        ctx.store.save(state)
+        return tool_response(
+            state,
+            "Plan approved and locked (scaffold/MCP-writable). "
+            "Call uiforgemax_advance to let MCP write template content.",
+            extra={"ideApplyBrief": brief, "mcpWritableScaffold": True},
+        )
+
+    roots: dict[str, Path] = {}
+    if state.project_root:
+        roots["default"] = Path(state.project_root)
+    for name, path in (state.project_roots or {}).items():
+        roots[str(name)] = Path(path)
+    write_pre_apply_baseline(run_dir, roots, plan)
+    state.status = Status.AWAITING_IDE_APPLY
+    state.artifacts["ideApply"] = True
+    state.artifacts["preApplyBaseline"] = "plans/pre-apply-baseline.json"
+    state.record(Stage.GATE_PLAN, "approved", f"{by}; awaiting_ide_apply")
     ctx.store.save(state)
     return tool_response(
         state,
-        "Plan approved and locked (plans/approved-plan.json). "
-        "Call uiforgemax_advance to implement that exact plan — no re-planning.",
+        "Plan approved and locked. Implement with IDE Read/Edit/Write on the listed "
+        "paths, then call uiforgemax_advance to verify — do not push file bodies via MCP.",
+        stop=True,
+        extra={"ideApplyBrief": brief, "waitForIdeApply": True},
     )
 
 

@@ -172,7 +172,8 @@ def test_submit_mediation_blocks_out_of_scope_delta_plan(tmp_path: Path):
             "create": [
                 {
                     "path": "unrelated.py",
-                    "content": "def unrelated_helper():\n    return 42\n",
+                    "purpose": "out of scope helper",
+                    "changeSummary": "should be rejected by delta scope",
                     "subtaskId": "ST-99",
                 }
             ],

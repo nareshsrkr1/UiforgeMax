@@ -9,6 +9,7 @@ from uiforgemax.mcp_response import tool_response
 from uiforgemax.model_mediation.registry import (
     MediationKind,
     build_mediation_request,
+    mediation_brief,
     wire_model_mediation,
 )
 from uiforgemax.model_mediation.service import (
@@ -110,63 +111,24 @@ def submit_mediation(
             )
     if kind == MediationKind.PLAN_REFINEMENT:
         from uiforgemax.pipeline.planning import (
-            plan_actions_missing_content,
-            plan_actions_noop_modifies,
+            plan_actions_missing_intent,
             plan_actions_outside_delta_scope,
-            plan_actions_placeholder_creates,
         )
 
-        # Merge-shaped payload: validate the create/modify it would write.
+        # Intent-only: path + purpose required; full file bodies are IDE-apply after approval.
         probe = {
             "create": data.get("create") if data.get("create") is not None else [],
             "modify": data.get("modify") if data.get("modify") is not None else [],
         }
-        # If mediation omitted both keys, keep existing plan check after apply —
-        # but when it sends path lists, every entry must be writable.
         if probe["create"] or probe["modify"]:
-            missing = plan_actions_missing_content(probe)
+            missing = plan_actions_missing_intent(probe)
             if missing:
                 return tool_response(
                     state,
-                    "BLOCKED: PLAN_REFINEMENT rejected — create/modify entries need full "
-                    f"`content` (or known greenfield templateId/patchId). Missing for: "
+                    "BLOCKED: PLAN_REFINEMENT rejected — create/modify entries need "
+                    f"path + purpose (intent). Missing for: "
                     f"{', '.join(missing[:12])}{'…' if len(missing) > 12 else ''}. "
-                    "Re-read graph/source-snapshots.json, edit each file, and resubmit "
-                    "with content= the FULL file body.",
-                    stop=True,
-                    extra={"runsDir": str(run_dir), "modelMediation": state.mediation.get("pending")},
-                )
-
-            snapshots_path = run_dir / "graph" / "source-snapshots.json"
-            snapshots = None
-            if snapshots_path.exists():
-                try:
-                    snapshots = json.loads(snapshots_path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    snapshots = None
-            noop = plan_actions_noop_modifies(probe, snapshots)
-            if noop:
-                return tool_response(
-                    state,
-                    "BLOCKED: PLAN_REFINEMENT rejected — these 'modify' actions return content "
-                    "IDENTICAL to the original file (no actual change): "
-                    f"{', '.join(noop[:12])}{'…' if len(noop) > 12 else ''}. "
-                    "A modify action must apply the requirement's real change. Re-read "
-                    "graph/source-snapshots.json, make the actual edit, and resubmit with the "
-                    "genuinely modified full file body — or move the path to 'create' only if "
-                    "it doesn't really need editing.",
-                    stop=True,
-                    extra={"runsDir": str(run_dir), "modelMediation": state.mediation.get("pending")},
-                )
-
-            placeholders = plan_actions_placeholder_creates(probe)
-            if placeholders:
-                return tool_response(
-                    state,
-                    "BLOCKED: PLAN_REFINEMENT rejected — these 'create' actions are trivial "
-                    "placeholders (TODO/stub/near-empty), not a real implementation: "
-                    f"{', '.join(placeholders[:12])}{'…' if len(placeholders) > 12 else ''}. "
-                    "Write the actual full file body implementing the requirement.",
+                    "Do not send full file bodies over MCP — the IDE writes after approval.",
                     stop=True,
                     extra={"runsDir": str(run_dir), "modelMediation": state.mediation.get("pending")},
                 )
@@ -215,10 +177,7 @@ def submit_mediation(
             state,
             f"Mediation saved. Next IDE mediation required: {kind.value}",
             stop=True,
-            extra={
-                "modelMediation": wire_model_mediation(request, run_dir),
-                "runsDir": str(run_dir),
-            },
+            extra=mediation_extra(ctx, state, full=False),
         )
 
     state.status = _status_after_stage(stage)
@@ -233,23 +192,28 @@ def submit_mediation(
     )
 
 
-def mediation_extra(ctx: ToolContext, state) -> dict:
+def mediation_extra(ctx: ToolContext, state, *, full: bool = False) -> dict:
+    """Extras for advance/status. Default is brief-only (clean MCP wire).
+
+    ``full=True`` (get_run_status) adds a lean ``modelMediation`` with instruction
+    preview so the agent can continue without reading content.json pointers.
+    """
     run_dir = ctx.store.run_dir(state.run_id)
     key = state.artifacts.get("pendingMediation", "")
     request = state.mediation.get("pending") or load_mediation_request(run_dir, key)
-    extra: dict = {"runsDir": str(run_dir)}
+    extra: dict = {
+        "runsDir": str(run_dir),
+        "recoveryHint": (
+            "If a prior tool result was an oversized content.json pointer or missing "
+            "nextTool: call uiforgemax_get_run_status — then follow nextTool / "
+            "mediationBrief (MCP-only; do not stop to ask the human)."
+        ),
+    }
     if request:
-        extra["modelMediation"] = wire_model_mediation(request, run_dir)
-        # Tiny always-inline brief so nextTool/mediationKey survive even if the
-        # host truncates nested modelMediation.
-        extra["mediationBrief"] = {
-            "mediationKey": request.get("mediationKey"),
-            "kind": request.get("kind"),
-            "stage": request.get("stage"),
-            "submitTool": "uiforgemax_submit_mediation",
-            "requestFile": (extra["modelMediation"] or {}).get("requestFile"),
-            "readArtifacts": request.get("readArtifacts") or [],
-        }
+        brief = mediation_brief(request, run_dir)
+        extra["mediationBrief"] = brief
+        if full:
+            extra["modelMediation"] = wire_model_mediation(request, run_dir)
     return extra
 
 

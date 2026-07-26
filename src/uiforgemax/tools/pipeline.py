@@ -17,9 +17,10 @@ def advance(ctx: ToolContext, run_id: str) -> str:
     if state.status == Status.AWAITING_MEDIATION:
         return tool_response(
             state,
-            "BLOCKED: IDE model mediation pending. Read modelMediation artifacts, then uiforgemax_submit_mediation.",
+            "BLOCKED: IDE model mediation pending. Use mediationBrief "
+            "(or uiforgemax_get_run_status) then uiforgemax_submit_mediation.",
             stop=True,
-            extra=mediation_extra(ctx, state),
+            extra=mediation_extra(ctx, state, full=False),
         )
     if state.status in Status.terminal():
         return tool_response(state, f"Run terminal ({state.status.value}).", stop=True)
@@ -55,31 +56,47 @@ def advance(ctx: ToolContext, run_id: str) -> str:
         ctx.store.save(state)
 
         if result.stop:
-            extra = mediation_extra(ctx, state)
-            if result.mediation:
-                extra["modelMediation"] = result.mediation
+            # Brief-only on advance — full mediation/plan packages blow IDE MCP
+            # size limits and become content.json pointers that break the flow.
+            extra = mediation_extra(ctx, state, full=False)
             if result.extra:
-                extra.update(result.extra)
+                # Keep small diagnostic keys; drop bulky nested packages.
+                for k, v in result.extra.items():
+                    if k in {"planApproval", "understandingApproval", "modelMediation", "runFlow"}:
+                        continue
+                    extra[k] = v
             if state.flow:
-                extra["runFlow"] = state.flow
-            # Re-attach human gate packages so the agent always has detail to display.
-            if state.status == Status.AWAITING_UNDERSTANDING_APPROVAL and "understandingApproval" not in extra:
-                from uiforgemax.pipeline.planning import build_understanding_approval_package
-
-                extra["understandingApproval"] = build_understanding_approval_package(run_dir)
-            if state.status == Status.AWAITING_PLAN_APPROVAL and "planApproval" not in extra:
+                flags = (state.flow or {}).get("flags") or {}
+                extra["runFlowBrief"] = {
+                    "surface": state.flow.get("surface"),
+                    "requestType": state.flow.get("requestType"),
+                    "flags": flags,
+                }
+            if state.status == Status.AWAITING_PLAN_APPROVAL:
                 from uiforgemax.pipeline.planning import build_plan_approval_package
 
-                # Keep wire small: full package is also written under plans/.
                 pkg = build_plan_approval_package(run_dir)
-                extra["planApproval"] = pkg
+                # Write full package for human display via get_run_status / file.
+                (run_dir / "plans" / "plan-approval.json").write_text(
+                    __import__("json").dumps(pkg, indent=2), encoding="utf-8"
+                )
+                extra["planApprovalBrief"] = {
+                    "summary": pkg.get("summary"),
+                    "issueKey": pkg.get("issueKey"),
+                    "filesToCreate": [
+                        (f.get("path") if isinstance(f, dict) else f)
+                        for f in (pkg.get("filesToCreate") or [])
+                    ][:80],
+                    "filesToModify": [
+                        (f.get("path") if isinstance(f, dict) else f)
+                        for f in (pkg.get("filesToModify") or [])
+                    ][:80],
+                    "planApprovalFile": "plans/plan-approval.json",
+                }
                 extra["planApprovalFile"] = "plans/plan-approval.json"
-            return tool_response(
-                state,
-                "advance log:\n" + "\n".join(log),
-                stop=True,
-                extra=extra,
-            )
+            # Truncate stage log — long multi-stage advances were a spill source.
+            msg = "advance log:\n" + "\n".join(log[-12:])
+            return tool_response(state, msg, stop=True, extra=extra)
 
         flow = load_flow(run_dir) or state.flow or flow
         nxt = next_active_stage(stage, flow)

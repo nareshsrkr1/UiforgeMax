@@ -9,7 +9,6 @@ from pathlib import Path
 
 from uiforgemax.graphify.engine import graphify_merge, graphify_update_multi, resolve_apis
 from uiforgemax.graphify.pipeline import stage_query_exec, stage_query_plan, stage_requirement_map
-from uiforgemax.graphify.source_snapshot import build_source_snapshots
 from uiforgemax.graphify.stack import detect_stack
 from uiforgemax.model_mediation.service import mediation_pause_result
 from uiforgemax.pipeline.classify import build_classification_signals, default_classification
@@ -20,6 +19,12 @@ from uiforgemax.pipeline.greenfield import (
     write_greenfield_graph_stubs,
 )
 from uiforgemax.pipeline.handover import generate_handover
+from uiforgemax.pipeline.ide_apply import (
+    ide_apply_brief,
+    partition_mcp_writable,
+    verify_ide_apply,
+    write_pre_apply_baseline,
+)
 from uiforgemax.pipeline.implement import apply_plan, PartialImplementError
 from uiforgemax.pipeline.normalize import normalize_run
 from uiforgemax.pipeline.planning import (
@@ -597,16 +602,8 @@ def _plan(ctx: ToolContext, state: RunState) -> StageResult:
         generate_plan(run_dir, reqs, req_map, api, feedback)
         state.approvals.plan.feedback = None
     state.artifacts["plan"] = "plans/implementation-plan.json"
-
-    # MCP itself (not the driving agent) reads literal current content for every
-    # candidate modify/reuse/create file so PLAN_REFINEMENT can safely return full
-    # file bodies without guessing structure it was never allowed to see.
-    draft_plan = _load_json(plan_path)
-    snapshots = build_source_snapshots(_project_roots(ctx, state), draft_plan)
-    (run_dir / "graph" / "source-snapshots.json").write_text(
-        json.dumps(snapshots, indent=2), encoding="utf-8"
-    )
-    state.artifacts["sourceSnapshots"] = "graph/source-snapshots.json"
+    # Intent-only PLAN_REFINEMENT: no source-snapshots content bus. The IDE reads
+    # target files after plan approval and writes them with native tools.
 
     pause = _maybe_pause_mediation(ctx, state, Stage.PLAN)
     if pause:
@@ -635,8 +632,8 @@ def _plan(ctx: ToolContext, state: RunState) -> StageResult:
 def _plan_review(ctx: ToolContext, state: RunState) -> StageResult:
     from uiforgemax.pipeline.planning import (
         EMPTY_PLAN_BLOCKER,
-        MISSING_CONTENT_BLOCKER,
-        plan_actions_missing_content,
+        MISSING_INTENT_BLOCKER,
+        plan_actions_missing_intent,
         plan_has_file_actions,
     )
 
@@ -647,10 +644,10 @@ def _plan_review(ctx: ToolContext, state: RunState) -> StageResult:
     blockers = list(review.get("blockers") or [])
     if not plan_has_file_actions(plan) and EMPTY_PLAN_BLOCKER not in blockers:
         blockers.append(EMPTY_PLAN_BLOCKER)
-    missing_bodies = plan_actions_missing_content(plan)
-    if missing_bodies and not any(MISSING_CONTENT_BLOCKER[:40] in str(b) for b in blockers):
+    missing_intent = plan_actions_missing_intent(plan)
+    if missing_intent and not any(MISSING_INTENT_BLOCKER[:40] in str(b) for b in blockers):
         blockers.append(
-            f"{MISSING_CONTENT_BLOCKER} Missing content for: {', '.join(missing_bodies[:12])}"
+            f"{MISSING_INTENT_BLOCKER} Missing intent for: {', '.join(missing_intent[:12])}"
         )
     if review.get("verdict") != "pass" or blockers:
         changes = review.get("requiredPlanChanges") or blockers
@@ -660,7 +657,7 @@ def _plan_review(ctx: ToolContext, state: RunState) -> StageResult:
             stop=True,
             message=(
                 f"Plan review blocked: {changes}. "
-                "Empty create/modify, missing file content, or hard blockers must be fixed "
+                "Empty create/modify or missing path/purpose must be fixed "
                 "via PLAN_REFINEMENT / request_changes — do not open the human approval gate."
             ),
         )
@@ -673,11 +670,10 @@ def _gate_plan(ctx: ToolContext, state: RunState) -> StageResult:
     from uiforgemax.env_flags import skip_plan_approval
     from uiforgemax.pipeline.planning import (
         EMPTY_PLAN_BLOCKER,
-        MISSING_CONTENT_BLOCKER,
-        plan_actions_missing_content,
-        plan_actions_noop_modifies,
+        MISSING_INTENT_BLOCKER,
+        plan_actions_missing_intent,
         plan_actions_outside_delta_scope,
-        plan_actions_placeholder_creates,
+        plan_all_mcp_writable,
         plan_has_file_actions,
         plan_is_implementable,
     )
@@ -697,51 +693,18 @@ def _gate_plan(ctx: ToolContext, state: RunState) -> StageResult:
             ),
         )
     if not plan_is_implementable(plan):
-        missing = plan_actions_missing_content(plan)
+        missing = plan_actions_missing_intent(plan)
         state.status = Status.BLOCKED
-        state.record(Stage.GATE_PLAN, "blocked", MISSING_CONTENT_BLOCKER)
+        state.record(Stage.GATE_PLAN, "blocked", MISSING_INTENT_BLOCKER)
         return StageResult(
             stop=True,
             message=(
-                f"BLOCKED: {MISSING_CONTENT_BLOCKER} "
-                f"Missing content for: {', '.join(missing[:12])}"
-                f"{'…' if len(missing) > 12 else ''}. "
-                "PLAN_REFINEMENT must return full file bodies before human approval."
+                f"BLOCKED: {MISSING_INTENT_BLOCKER} "
+                f"Missing path/purpose for: {', '.join(missing[:12])}"
+                f"{'…' if len(missing) > 12 else ''}."
             ),
         )
 
-    # Deterministic backstops that submit_mediation already enforces on the
-    # mediated path — repeated here so they also apply when mediation is
-    # bypassed (UIFORGEMAX_SKIP_MEDIATION=1 dev/CI mode uses a deterministic
-    # plan that never goes through submit_mediation's PLAN_REFINEMENT checks).
-    snapshots_path = run_dir / "graph" / "source-snapshots.json"
-    snapshots = _load_json(snapshots_path) if snapshots_path.exists() else None
-    noop = plan_actions_noop_modifies(plan, snapshots)
-    if noop:
-        state.status = Status.BLOCKED
-        state.record(Stage.GATE_PLAN, "blocked", "noop_modifies")
-        return StageResult(
-            stop=True,
-            message=(
-                "BLOCKED: these 'modify' actions return content IDENTICAL to the "
-                f"original file (no actual change): {', '.join(noop[:12])}"
-                f"{'…' if len(noop) > 12 else ''}. Re-run PLAN_REFINEMENT with a "
-                "genuine edit for each path."
-            ),
-        )
-    placeholders = plan_actions_placeholder_creates(plan)
-    if placeholders:
-        state.status = Status.BLOCKED
-        state.record(Stage.GATE_PLAN, "blocked", "placeholder_creates")
-        return StageResult(
-            stop=True,
-            message=(
-                "BLOCKED: these 'create' actions are trivial placeholders "
-                f"(TODO/stub/near-empty), not a real implementation: "
-                f"{', '.join(placeholders[:12])}{'…' if len(placeholders) > 12 else ''}. "
-                "Re-run PLAN_REFINEMENT with the actual full file body."
-            ),
-        )
     delta_path = run_dir / "plans" / "visual-delta.json"
     if delta_path.exists():
         visual_delta = _load_json(delta_path)
@@ -778,9 +741,25 @@ def _gate_plan(ctx: ToolContext, state: RunState) -> StageResult:
         state.approvals.understanding.required = False
         state.artifacts["approvedPlan"] = "plans/approved-plan.json"
         state.record(Stage.GATE_PLAN, "approved", "env skip")
+        if plan_all_mcp_writable(plan):
+            return StageResult(
+                stop=False,
+                message="Plan auto-approved (UIFORGEMAX_SKIP_PLAN_APPROVAL=1) — MCP writable.",
+            )
+        # Intent-only: pause for IDE apply even when human gate is skipped.
+        roots = _project_roots(ctx, state)
+        write_pre_apply_baseline(run_dir, roots, plan)
+        state.status = Status.AWAITING_IDE_APPLY
+        state.current_stage = Stage.IMPLEMENT
+        state.artifacts["ideApply"] = True
+        state.artifacts["preApplyBaseline"] = "plans/pre-apply-baseline.json"
         return StageResult(
-            stop=False,
-            message="Plan auto-approved (UIFORGEMAX_SKIP_PLAN_APPROVAL=1).",
+            stop=True,
+            message=(
+                "Plan auto-approved (UIFORGEMAX_SKIP_PLAN_APPROVAL=1). "
+                "IDE-apply: edit listed paths, then uiforgemax_advance."
+            ),
+            extra={"ideApplyBrief": ide_apply_brief(plan), "waitForIdeApply": True},
         )
 
     if not state.approvals.plan.approved:
@@ -793,7 +772,7 @@ def _gate_plan(ctx: ToolContext, state: RunState) -> StageResult:
         return StageResult(
             stop=True,
             message=(
-                "HUMAN PLAN GATE — show planApproval, then wait. "
+                "HUMAN PLAN GATE — show planApprovalBrief / planApproval, then wait. "
                 "Do NOT call approve_plan until the human explicitly approves. "
                 "Then: uiforgemax_approve_plan or request_changes. "
                 "Dev bypass: UIFORGEMAX_SKIP_PLAN_APPROVAL=1."
@@ -804,7 +783,14 @@ def _gate_plan(ctx: ToolContext, state: RunState) -> StageResult:
                 "waitForHuman": True,
             },
         )
-    return StageResult(stop=False, message="Plan approved — implementing locked plan.")
+    # Already approved — either IDE-apply pause or MCP scaffold write.
+    if state.status == Status.AWAITING_IDE_APPLY:
+        return StageResult(
+            stop=True,
+            message="Awaiting IDE apply — edit plan paths, then advance.",
+            extra={"ideApplyBrief": ide_apply_brief(plan), "waitForIdeApply": True},
+        )
+    return StageResult(stop=False, message="Plan approved — continuing to implement/verify.")
 
 
 def _implement(ctx: ToolContext, state: RunState) -> StageResult:
@@ -942,12 +928,72 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
     plan = _load_json(plan_path)
     subtasks = load_subtasks(run_dir)
     expected = len(plan.get("create") or []) + len(plan.get("modify") or [])
+    mcp_plan, ide_plan = partition_mcp_writable(plan)
+    ide_expected = len(ide_plan.get("create") or []) + len(ide_plan.get("modify") or [])
+    baseline_path = run_dir / "plans" / "pre-apply-baseline.json"
+
+    # IDE-apply path: agent already edited files; verify vs baseline.
+    if state.status == Status.AWAITING_IDE_APPLY or (
+        ide_expected > 0 and state.artifacts.get("ideApply")
+    ):
+        if state.status == Status.AWAITING_IDE_APPLY and not baseline_path.exists():
+            write_pre_apply_baseline(run_dir, roots, plan)
+        baseline = _load_json(baseline_path) if baseline_path.exists() else {}
+        # Optional: MCP still writes scaffolds that carry templateId/content.
+        mcp_changed: list[str] = []
+        if mcp_plan.get("create") or mcp_plan.get("modify"):
+            try:
+                mcp_summary = apply_plan(roots, mcp_plan, subtasks=None)
+                mcp_changed = list(mcp_summary.get("filesChanged") or [])
+            except PartialImplementError as exc:
+                return StageResult(
+                    stop=True,
+                    message=(
+                        f"IMPLEMENT FAILED: scaffold write partial — skipped "
+                        f"{[s['path'] for s in exc.skipped]}."
+                    ),
+                )
+        summary, problems = verify_ide_apply(roots, ide_plan if ide_expected else plan, baseline)
+        summary["filesChanged"] = list(dict.fromkeys(mcp_changed + list(summary.get("filesChanged") or [])))
+        summary["fileCount"] = len(summary["filesChanged"])
+        (run_dir / "implementation").mkdir(parents=True, exist_ok=True)
+        (run_dir / "implementation" / "diff-summary.json").write_text(
+            json.dumps(summary, indent=2), encoding="utf-8"
+        )
+        state.artifacts["diffSummary"] = "implementation/diff-summary.json"
+        if problems:
+            state.status = Status.AWAITING_IDE_APPLY
+            state.record(Stage.IMPLEMENT, "blocked", f"ide_apply incomplete: {problems[:8]}")
+            return StageResult(
+                stop=True,
+                message=(
+                    "IDE APPLY INCOMPLETE — these planned paths are missing or unchanged: "
+                    f"{', '.join(problems[:12])}{'…' if len(problems) > 12 else ''}. "
+                    "Edit them with IDE Read/Edit/Write, then call uiforgemax_advance again."
+                ),
+                extra={
+                    "ideApplyBrief": ide_apply_brief(plan),
+                    "waitForIdeApply": True,
+                    "incompletePaths": problems,
+                    "diffSummary": summary,
+                },
+            )
+        count = int(summary.get("fileCount") or 0)
+        state.status = Status.IMPLEMENTING
+        state.artifacts.pop("ideApply", None)
+        state.record(Stage.IMPLEMENT, "ok", f"ide_apply verified {count} files")
+        msg = f"IDE apply verified {count} file(s)."
+        pause = _maybe_pause_mediation(ctx, state, Stage.IMPLEMENT)
+        if pause:
+            pause.message = f"{msg} — POST_IMPLEMENT_REVIEW mediation required."
+            return pause
+        return StageResult(stop=False, message=msg)
+
+    # MCP-writable path (all actions have content/templateId) — greenfield / CI scaffolds.
     with StageTimer(run_dir, Stage.IMPLEMENT.value) as t:
         try:
             summary = apply_plan(roots, plan, subtasks=subtasks)
         except PartialImplementError as exc:
-            # Some files were written, some were not.  Fail hard so the operator
-            # knows they need to re-run PLAN_REFINEMENT with content= fields.
             t.stats = {
                 "filesChanged": len(exc.changed),
                 "skipped": len(exc.skipped),
@@ -962,11 +1008,34 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
                 "source": plan.get("source"),
                 "roots": {name: str(p) for name, p in roots.items()},
                 "partialFail": True,
+                "mode": "mcp_write",
             }
             (run_dir / "implementation" / "diff-summary.json").write_text(
                 json.dumps(partial_summary, indent=2), encoding="utf-8"
             )
             state.artifacts["diffSummary"] = "implementation/diff-summary.json"
+            # Intent leftovers → switch to IDE apply instead of hard-fail.
+            if ide_expected > 0 or any(
+                "content" in str(s.get("reason", "")).lower()
+                or "no writer" in str(s.get("reason", "")).lower()
+                for s in exc.skipped
+            ):
+                write_pre_apply_baseline(run_dir, roots, plan)
+                state.status = Status.AWAITING_IDE_APPLY
+                state.artifacts["ideApply"] = True
+                state.record(Stage.IMPLEMENT, "awaiting_ide_apply", str(exc.skipped)[:200])
+                return StageResult(
+                    stop=True,
+                    message=(
+                        "MCP could not write all planned files (intent-only plan). "
+                        "Edit the listed paths with IDE tools, then uiforgemax_advance."
+                    ),
+                    extra={
+                        "ideApplyBrief": ide_apply_brief(plan),
+                        "waitForIdeApply": True,
+                        "skippedPaths": [s["path"] for s in exc.skipped],
+                    },
+                )
             state.status = Status.FAILED
             skipped_paths = [s["path"] for s in exc.skipped]
             state.record(
@@ -977,25 +1046,10 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
             return StageResult(
                 stop=True,
                 message=(
-                    f"IMPLEMENT FAILED (partial): {len(exc.changed)} file(s) written but "
-                    f"{len(exc.skipped)} skipped because PLAN_REFINEMENT mediation did not "
-                    f"supply 'content' for them.\n"
-                    f"Skipped paths: {skipped_paths}\n"
-                    "Fix: Re-run PLAN_REFINEMENT mediation and supply a full 'content' field "
-                    "for every skipped path, then call uiforgemax_advance."
+                    f"IMPLEMENT FAILED (partial): {len(exc.changed)} written, "
+                    f"{len(exc.skipped)} skipped: {skipped_paths}."
                 ),
-                extra={
-                    "diffSummary": partial_summary,
-                    "partialFail": True,
-                    "skippedPaths": skipped_paths,
-                    "writtenPaths": exc.changed,
-                    "remediationHint": (
-                        "Re-run PLAN_REFINEMENT mediation (uiforgemax_submit_mediation) "
-                        "with 'content' for each skipped path. "
-                        "Read graph/source-snapshots.json for current file content to base "
-                        "modify actions on."
-                    ),
-                },
+                extra={"diffSummary": partial_summary, "partialFail": True},
             )
 
         t.stats = {
@@ -1017,21 +1071,22 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
             stop=True,
             message=(
                 "IMPLEMENT FAILED: approved plan has 0 create/modify actions — nothing to write. "
-                "This should have been blocked at plan review. "
                 "Use request_changes / PLAN_REFINEMENT to add real file targets."
             ),
             extra={"diffSummary": summary},
         )
     if expected > 0 and count == 0:
-        state.status = Status.FAILED
-        state.record(Stage.IMPLEMENT, "failed", f"0/{expected} files; skipped={skipped}")
+        write_pre_apply_baseline(run_dir, roots, plan)
+        state.status = Status.AWAITING_IDE_APPLY
+        state.artifacts["ideApply"] = True
+        state.record(Stage.IMPLEMENT, "awaiting_ide_apply", "0 mcp writes")
         return StageResult(
             stop=True,
             message=(
-                f"IMPLEMENT FAILED: plan had {expected} file action(s) but wrote 0. "
-                f"skipped={skipped}. Fix implement writers or plan templateId/patchId/content."
+                f"No MCP writes for {expected} planned action(s). "
+                "Implement with IDE Read/Edit/Write, then uiforgemax_advance."
             ),
-            extra={"diffSummary": summary},
+            extra={"ideApplyBrief": ide_apply_brief(plan), "waitForIdeApply": True},
         )
     state.status = Status.IMPLEMENTING
     if summary.get("subtaskResults"):
@@ -1086,8 +1141,8 @@ def _test(ctx: ToolContext, state: RunState) -> StageResult:
                 stop=True,
                 message=(
                     "TEST BLOCKED: implementation/diff-summary.json shows 0 files changed. "
-                    "Fix the plan / PLAN_REFINEMENT (supply content for create/modify), "
-                    "re-run implement, then test. Do not generate tests for a noop implement."
+                    "Complete IDE apply (or MCP scaffold write), then test. "
+                    "Do not generate tests for a noop implement."
                 ),
                 extra={"diffSummary": diff},
             )

@@ -255,11 +255,12 @@ def _derive_topology(run_dir: Path, requirements: dict[str, Any], req_map: dict[
 
 
 EMPTY_PLAN_BLOCKER = "Plan has no create/modify files — nothing to implement."
-MISSING_CONTENT_BLOCKER = (
-    "Plan lists create/modify paths but PLAN_REFINEMENT did not supply writable "
-    "`content` (or a known greenfield templateId/patchId). Implement cannot invent "
-    "product code from path+purpose alone — re-run PLAN_REFINEMENT with full file bodies."
+MISSING_INTENT_BLOCKER = (
+    "Plan create/modify entries need path + purpose (intent). "
+    "Full file bodies are written by the IDE agent after plan approval — not via MCP."
 )
+# Deprecated alias — intent-only plans no longer require mediated `content`.
+MISSING_CONTENT_BLOCKER = MISSING_INTENT_BLOCKER
 
 # Scaffold / legacy writers that can produce bytes without mediated `content`.
 _WRITABLE_WITHOUT_CONTENT_TEMPLATES = frozenset(
@@ -305,7 +306,10 @@ def plan_file_action_count(plan: dict[str, Any] | None) -> int:
 
 
 def action_has_writable_body(action: dict[str, Any] | None) -> bool:
-    """True when implement can write this action without inventing product code."""
+    """True when MCP can still write this action (scaffold/template or mediated body).
+
+    Intent-only plans typically return False — the IDE agent writes those files.
+    """
     if not action:
         return False
     content = action.get("content")
@@ -320,8 +324,31 @@ def action_has_writable_body(action: dict[str, Any] | None) -> bool:
     return False
 
 
+def action_has_intent(action: dict[str, Any] | None) -> bool:
+    """True when the action has enough intent for the human plan gate (path + purpose)."""
+    if not action:
+        return False
+    path = str(action.get("path") or "").strip()
+    purpose = str(action.get("purpose") or action.get("changeSummary") or "").strip()
+    return bool(path and purpose)
+
+
+def plan_actions_missing_intent(plan: dict[str, Any] | None) -> list[str]:
+    """Paths lacking path+purpose intent (not approvable)."""
+    if not plan:
+        return []
+    missing: list[str] = []
+    for action in list(plan.get("create") or []) + list(plan.get("modify") or []):
+        if not action_has_intent(action):
+            missing.append(str(action.get("path") or "?"))
+    return missing
+
+
 def plan_actions_missing_content(plan: dict[str, Any] | None) -> list[str]:
-    """Paths that would be skipped at implement (path+purpose only, no body)."""
+    """Paths MCP cannot write itself (no content/template) — IDE apply handles these.
+
+    Kept for diagnostics / scaffold detection; no longer a hard plan-gate blocker.
+    """
     if not plan:
         return []
     missing: list[str] = []
@@ -332,7 +359,12 @@ def plan_actions_missing_content(plan: dict[str, Any] | None) -> list[str]:
 
 
 def plan_is_implementable(plan: dict[str, Any] | None) -> bool:
-    """Non-empty create/modify AND every action has content or a known scaffold id."""
+    """Non-empty create/modify with path+purpose intent on every action (IDE writes bodies)."""
+    return plan_has_file_actions(plan) and not plan_actions_missing_intent(plan)
+
+
+def plan_all_mcp_writable(plan: dict[str, Any] | None) -> bool:
+    """True when every action has content/template — MCP may write without IDE apply."""
     return plan_has_file_actions(plan) and not plan_actions_missing_content(plan)
 
 
@@ -492,9 +524,9 @@ def build_plan_review(
     """Build plan-review.json from the current plan.
 
     Soft risks (e.g. README-only) stay advisory. Hard blockers — including an
-    empty create/modify list or paths without ``content`` — always force
-    ``verdict: revise`` so we never open the human plan gate for a plan that
-    would write 0 product files after approval.
+    empty create/modify list or paths without intent (path+purpose) — always force
+    ``verdict: revise`` so we never open the human plan gate for a noop plan.
+    Full file ``content`` is optional (IDE writes after approval).
     """
     requirements = requirements or {}
     req_map = req_map or {}
@@ -511,11 +543,11 @@ def build_plan_review(
         if r not in risks:
             risks.append(r)
 
-    missing_bodies = plan_actions_missing_content(plan)
-    if missing_bodies and MISSING_CONTENT_BLOCKER not in blockers:
+    missing_intent = plan_actions_missing_intent(plan)
+    if missing_intent and MISSING_INTENT_BLOCKER not in blockers:
         blockers.append(
-            f"{MISSING_CONTENT_BLOCKER} Missing content for: {', '.join(missing_bodies[:12])}"
-            + ("…" if len(missing_bodies) > 12 else "")
+            f"{MISSING_INTENT_BLOCKER} Missing intent for: {', '.join(missing_intent[:12])}"
+            + ("…" if len(missing_intent) > 12 else "")
         )
 
     ac_total = len(requirements.get("acceptanceCriteria", []))
@@ -528,7 +560,10 @@ def build_plan_review(
         "risks": risks,
         "blockers": blockers,
         "requiredPlanChanges": required,
-        "missingContentPaths": missing_bodies,
+        "missingIntentPaths": missing_intent,
+        # Compat: no longer a hard blocker; lists MCP-non-writable paths (IDE apply).
+        "missingContentPaths": plan_actions_missing_content(plan),
+        "ideApply": not plan_all_mcp_writable(plan),
         "validationPlan": plan.get("validationPlan") or {},
     }
 
@@ -677,7 +712,10 @@ def build_plan_approval_package(run_dir: Path, plan: dict[str, Any] | None = Non
             {
                 "path": f.get("path"),
                 "purpose": f.get("purpose"),
+                "changeSummary": f.get("changeSummary") or f.get("purpose"),
                 "root": f.get("root", "default"),
+                "hasIntent": action_has_intent(f),
+                "mcpWritable": action_has_writable_body(f),
                 "hasContent": action_has_writable_body(f),
             }
             for f in create
@@ -686,7 +724,10 @@ def build_plan_approval_package(run_dir: Path, plan: dict[str, Any] | None = Non
             {
                 "path": f.get("path"),
                 "purpose": f.get("purpose"),
+                "changeSummary": f.get("changeSummary") or f.get("purpose"),
                 "root": f.get("root", "default"),
+                "hasIntent": action_has_intent(f),
+                "mcpWritable": action_has_writable_body(f),
                 "hasContent": action_has_writable_body(f),
             }
             for f in modify

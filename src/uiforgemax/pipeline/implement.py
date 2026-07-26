@@ -164,10 +164,9 @@ def apply_plan(
                 else f"IMPLEMENT WROTE NOTHING: all {len(skipped)} planned file(s) were skipped.\n"
             )
             + f"Skipped: {skipped_summary}\n"
-            "PLAN_REFINEMENT mediation must supply 'content' for every create/modify "
-            "action — MCP does not invent product-specific code for files it has not "
-            "been given content for.  Re-run PLAN_REFINEMENT mediation with 'content' "
-            "fields for each skipped path, then uiforgemax_advance.",
+            "Intent-only plans are applied by the IDE (awaiting_ide_apply): edit the "
+            "skipped paths with Read/Edit/Write, then uiforgemax_advance to verify. "
+            "Only greenfield scaffold templateId/patchId actions are MCP-writable.",
             changed=changed,
             skipped=skipped,
         )
@@ -291,10 +290,9 @@ def _apply_plan_subtasked(
                 else f"IMPLEMENT WROTE NOTHING: all {len(skipped)} planned file(s) were skipped.\n"
             )
             + f"Skipped: {skipped_summary}\n"
-            "PLAN_REFINEMENT mediation must supply 'content' for every create/modify "
-            "action — MCP does not invent product-specific code for files it has not "
-            "been given content for.  Re-run PLAN_REFINEMENT mediation with 'content' "
-            "fields for each skipped path, then uiforgemax_advance.",
+            "Intent-only plans are applied by the IDE (awaiting_ide_apply): edit the "
+            "skipped paths with Read/Edit/Write, then uiforgemax_advance to verify. "
+            "Only greenfield scaffold templateId/patchId actions are MCP-writable.",
             changed=changed,
             skipped=skipped,
         )

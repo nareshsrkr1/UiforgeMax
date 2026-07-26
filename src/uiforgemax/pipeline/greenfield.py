@@ -88,47 +88,64 @@ def build_greenfield_requirement_map(
     requirements: dict[str, Any],
     classification: dict[str, Any],
 ) -> dict[str, Any]:
-    """Plan file creates for a greenfield app (no graph reuse)."""
+    """Intent-only file skeleton for a greenfield app (no graph reuse).
+
+    Does NOT hardcode FastAPI/HTML templateIds — PLAN_REFINEMENT + IDE apply
+    choose the real stack (Python/Go/Java/.NET/Node/…). Optional greenfield.*
+    templateIds remain available if mediation explicitly opts into a scaffold.
+    """
     surface = classification.get("surface", "full_stack")
     policy = requirements.get("policy", {})
     target_app = policy.get("targetApp", "app")
+    platforms = [str(p).lower() for p in (classification.get("platform") or [])]
+    plat = " ".join(platforms)
+    # Soft entry paths only — PLAN_REFINEMENT should replace with the real stack.
+    # No templateId → IDE apply writes (not MCP FastAPI/HTML scaffolds).
+    api_path = "src/api/main.py"
+    ui_path = "src/ui/index.html"
+    if "go" in plat:
+        api_path = "cmd/server/main.go"
+    elif "java" in plat or "jvm" in plat:
+        api_path = "src/main/java/App.java"
+    elif ".net" in plat or "csharp" in plat or "c#" in plat:
+        api_path = "src/App/Program.cs"
+    elif "node" in plat or "javascript" in plat or "typescript" in plat:
+        api_path = "src/server/index.ts"
+        ui_path = "src/ui/App.tsx"
+    elif "python" in plat:
+        api_path = "src/api/main.py"
 
     create: list[dict[str, str]] = []
     modify: list[dict[str, str]] = []
 
     if surface in ("full_stack", "api_only", "unknown", "infra"):
-        create.extend(
-            [
-                {"path": "backend/requirements.txt", "purpose": "Python deps", "templateId": "greenfield.backend_requirements"},
-                {"path": "backend/app/__init__.py", "purpose": "Package marker", "templateId": "greenfield.backend_init"},
-                {"path": "backend/app/store.py", "purpose": "In-memory store", "templateId": "greenfield.backend_store"},
-                {"path": "backend/app/main.py", "purpose": "FastAPI CRUD API", "templateId": "greenfield.backend_main"},
-                {"path": "backend/README.md", "purpose": "Backend docs", "templateId": "greenfield.backend_readme"},
-            ]
+        create.append(
+            {
+                "path": api_path,
+                "purpose": "API/service entrypoint (refine path for chosen stack)",
+                "changeSummary": (
+                    "Create the real service entry for this requirement; "
+                    "PLAN_REFINEMENT may replace this path for Go/Java/.NET/Node/etc."
+                ),
+            }
         )
 
     if surface in ("full_stack", "ui_only", "unknown"):
-        create.extend(
-            [
-                {"path": "ui/index.html", "purpose": "CRUD UI entry point", "templateId": "greenfield.ui_index"},
-                {"path": "ui/styles.css", "purpose": "UI styles", "templateId": "greenfield.ui_styles"},
-                {"path": "ui/serve.py", "purpose": "Static UI server", "templateId": "greenfield.ui_serve"},
-                {"path": "ui/README.md", "purpose": "UI docs", "templateId": "greenfield.ui_readme"},
-            ]
+        create.append(
+            {
+                "path": ui_path,
+                "purpose": "UI entrypoint (refine path for chosen stack)",
+                "changeSummary": (
+                    "Create the real UI entry; replace with React/Vue/.razor/etc. as needed."
+                ),
+            }
         )
-
-    create.extend(
-        [
-            {"path": "README.md", "purpose": "Project overview", "templateId": "greenfield.readme"},
-            {"path": "start.ps1", "purpose": "Launch script", "templateId": "greenfield.start_ps1"},
-        ]
-    )
 
     ac_mappings = [
         {
             "acId": ac.get("id", f"AC-{i + 1}"),
             "requirement": ac.get("text", ""),
-            "strategy": "Greenfield scaffold + IDE plan refinement",
+            "strategy": "Greenfield intent + IDE apply (stack-agnostic)",
             "graphEvidence": [],
         }
         for i, ac in enumerate(requirements.get("acceptanceCriteria", []))

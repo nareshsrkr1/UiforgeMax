@@ -28,17 +28,19 @@ class MediationKind(str, Enum):
 
 
 # Stages that pause for IDE model mediation after deterministic MCP work.
+# Lean cut: no QUERY_STRATEGY pause (requirements.graphSearchStrategy + deterministic
+# planner). Visual SoT folds into REQUIREMENT_ANALYSIS. REQ_MAP_VALIDATION folds into
+# GRAPH_EXPLAIN. PLAN_REFINEMENT is intent-only (IDE writes files after approval).
 MEDIATION_BY_STAGE: dict[Stage, MediationKind] = {
     Stage.CLASSIFY: MediationKind.REQUEST_CLASSIFICATION,
     Stage.NORMALIZE: MediationKind.REQUIREMENT_ANALYSIS,
-    Stage.GRAPH_QUERY_PLAN: MediationKind.QUERY_STRATEGY,
     Stage.REQUIREMENT_MAP: MediationKind.GRAPH_EXPLAIN,
     Stage.PLAN: MediationKind.PLAN_REFINEMENT,
     Stage.TEST: MediationKind.TEST_GENERATION,
     Stage.DECOMPOSE: MediationKind.TASK_DECOMPOSITION,
 }
 
-# Additional visual pass when image input exists (runs after REQUIREMENT_ANALYSIS)
+# Legacy constants — visual is folded into REQUIREMENT_ANALYSIS (not a separate pause).
 VISUAL_STAGE = Stage.NORMALIZE
 VISUAL_KIND = MediationKind.VISUAL_INTERPRETATION
 
@@ -130,32 +132,66 @@ def attach_artifact_contents(request: dict[str, Any], run_dir: Path) -> dict[str
     return enriched
 
 
-def wire_model_mediation(request: dict[str, Any] | None, run_dir: Path) -> dict[str, Any] | None:
-    """Agent-facing mediation payload sized for MCP hosts (avoid content.json spill).
-
-    Keeps instruction / schema / paths. Does not dump huge artifact bodies by default.
-    Points the agent at the on-disk request file + runsDir for any Reads.
-    """
+def mediation_brief(request: dict[str, Any] | None, run_dir: Path) -> dict[str, Any] | None:
+    """Tiny mediation pointer — safe to always put on the MCP wire."""
     if not request:
         return None
     key = str(request.get("mediationKey") or "pending")
     safe = key.replace("::", "_").replace("/", "_")
     request_rel = f"mediation/{safe}.request.json"
-    wire = attach_artifact_contents(dict(request), run_dir)
-    wire["runsDir"] = str(run_dir)
-    wire["requestFile"] = request_rel
-    wire["requestFileAbs"] = str(run_dir / request_rel)
-    wire["readHint"] = (
-        "Read artifacts under runsDir (MCP run folder — allowed). "
-        "If the IDE spilled this tool result to a content.json pointer, Read that "
-        "pointer file — it IS the tool result, not target-project exploration. "
-        f"Full mediation request also at {request_rel}."
-    )
-    # Cap instruction length on the wire; full text remains in requestFile.
-    instr = wire.get("instruction")
-    if isinstance(instr, str) and len(instr) > 6_000:
-        wire["instruction"] = instr[:6_000] + "\n…[truncated — see requestFile for full instruction]"
-        wire["instructionTruncated"] = True
+    instr = request.get("instruction")
+    preview = ""
+    if isinstance(instr, str) and instr.strip():
+        preview = instr.strip()[:800]
+        if len(instr) > 800:
+            preview += "…"
+    return {
+        "mediationKey": request.get("mediationKey"),
+        "kind": request.get("kind"),
+        "stage": request.get("stage"),
+        "submitTool": "uiforgemax_submit_mediation",
+        "requestFile": request_rel,
+        "requestFileAbs": str(run_dir / request_rel),
+        "runsDir": str(run_dir),
+        "readArtifacts": list(request.get("readArtifacts") or [])[:40],
+        "readImages": list(request.get("readImages") or [])[:20],
+        "instructionPreview": preview,
+        "recovery": (
+            "If this tool result was spilled to content.json / unreadable: call "
+            "uiforgemax_get_run_status(run_id) — it returns mediationBrief + nextTool "
+            "via MCP only (no file Read required). Then submit_mediation."
+        ),
+    }
+
+
+def wire_model_mediation(request: dict[str, Any] | None, run_dir: Path) -> dict[str, Any] | None:
+    """Lean agent-facing mediation for MCP hosts (avoid content.json spill).
+
+    Default wire is a brief + short instruction preview. Full instruction/schema
+    live in ``requestFile`` under runsDir. Opt into heavier embeds with
+    ``UIFORGEMAX_INLINE_ARTIFACTS=1``.
+    """
+    brief = mediation_brief(request, run_dir)
+    if not brief or not request:
+        return brief
+    # Prefer brief-sized payload on the wire; attach full fields only when small.
+    wire = dict(brief)
+    wire["outputSchema"] = request.get("outputSchema")
+    wire["submitHint"] = request.get("submitHint")
+    wire["useIdeModel"] = request.get("useIdeModel", True)
+    # Short instruction on wire; full text always in requestFile.
+    instr = request.get("instruction")
+    if isinstance(instr, str):
+        if len(instr) <= 2_000:
+            wire["instruction"] = instr
+        else:
+            wire["instruction"] = instr[:2_000] + "\n…[truncated — full text in requestFile]"
+            wire["instructionTruncated"] = True
+    if _inline_artifacts_enabled():
+        enriched = attach_artifact_contents({"readArtifacts": request.get("readArtifacts") or []}, run_dir)
+        if enriched.get("artifactContents"):
+            wire["artifactContents"] = enriched["artifactContents"]
+            wire["artifactContentsNote"] = enriched.get("artifactContentsNote")
     return wire
 
 
@@ -173,10 +209,9 @@ def build_mediation_request(
         "mediationKey": _mediation_key(stage, kind),
         "submitTool": "uiforgemax_submit_mediation",
         "submitHint": (
-            "For large payloads (e.g. PLAN_REFINEMENT with full file contents), "
-            "write the JSON to a .json file in the run's mediation/ folder then call "
-            "uiforgemax_submit_mediation with payload_file='mediation/<filename>.json' "
-            "instead of passing the JSON inline as payload."
+            "PLAN_REFINEMENT is intent-only (path/purpose/changeSummary) — small JSON is fine "
+            "inline. For unusually large payloads, write JSON under mediation/ and call "
+            "uiforgemax_submit_mediation with payload_file='mediation/<filename>.json'."
         ),
         "useIdeModel": True,
         "note": "Use Cursor/VS Code model — UiForgeMax MCP holds no LLM keys.",
@@ -225,36 +260,24 @@ def build_mediation_request(
         }
 
     if kind == MediationKind.REQUIREMENT_ANALYSIS:
+        # Single UNDERSTAND pass: requirements + visual SoT (folded VISUAL_INTERPRETATION).
         return {
             **base,
             "instruction": (
-                "Analyze intake using your IDE model. Resolve Jira description vs comments/overrides "
-                "(latest override wins). Output structured JSON only — no repo edits.\n\n"
-                "SOURCE OF TRUTH: Read inputs/attachments.json and any inputs/page.html / images. "
-                "HTML, wireframes, mockups, and design-note attachments are authoritative for UX, "
-                "tokens, and layout — do not invent visuals that contradict them.\n\n"
+                "UNDERSTAND (one pass): Analyze intake + visual source of truth. "
+                "Resolve Jira description vs comments/overrides (latest wins). "
+                "Output structured JSON only — no repo edits.\n\n"
+                "SOURCE OF TRUTH: Read inputs/attachments.json, inputs/page.html, and readImages. "
+                "HTML / wireframes / mockups / design notes are authoritative for UX — do not "
+                "invent visuals that contradict them.\n\n"
+                "If visual SoT exists (HTML/images/wireframe/mockup): also fill visual fields "
+                "(layout, components, tokens, exactTextRequirements, matchExactly) and set "
+                "visualSpecUnconfirmed=false. Replace any provisional visual-spec shell.\n\n"
                 "CRITICAL — graphSearchStrategy (MANDATORY):\n"
-                "The Graphify codebase index uses keyword-based queries to find relevant files. "
-                "Your graphSearchStrategy drives ALL downstream queries — if you get this wrong, "
-                "the pipeline searches for the wrong files and the plan will be incorrect.\n\n"
-                "You MUST produce stack-aware, domain-specific search guidance:\n"
-                "- intent: the overall search intent (theme_ui | ui | api | data_model | "
-                "full_stack | infra | general)\n"
-                "- filePatterns: file patterns likely relevant for THIS stack (e.g. '*.tsx' for "
-                "React, '*.py' for Python, '*.go' for Go, '*.cs' for .NET — NOT hardcoded React)\n"
-                "- componentNames: actual component/module/class names to search for based on "
-                "the requirement (e.g. 'Sidebar', 'UserService', 'auth_middleware')\n"
-                "- perAcSearch: for EACH acceptance criterion, provide targeted search terms "
-                "that would find the files relevant to implementing that AC\n"
-                "- architecturalPatterns: patterns specific to the detected stack (e.g. "
-                "'pages/', 'components/', 'routes/' for React; 'models/', 'views/', 'urls.py' "
-                "for Django; 'handlers/', 'services/' for Go)\n"
-                "- keywords: 5-12 short search tokens specific to THIS requirement\n"
-                "- focusFiles: likely relative paths if known from the requirement context\n"
-                "- searchQueries: 1-3 ultra-short keyword strings (max ~60 chars each) that "
-                "Graphify CLI will use — these should be specific to the domain, NOT generic\n\n"
-                "DO NOT use generic keywords like 'component', 'page', 'style' unless the "
-                "requirement is actually about those things. Be specific to what the ticket asks for."
+                "Drive Graphify keyword queries with stack-aware, domain-specific guidance:\n"
+                "- intent, filePatterns, componentNames, perAcSearch, architecturalPatterns,\n"
+                "- keywords (5-12), focusFiles, searchQueries (1-3, max ~60 chars each).\n"
+                "Be specific to THIS ticket — avoid generic 'component'/'page'/'style' tokens."
             ),
             "readArtifacts": [
                 "requirements.normalized.json",
@@ -266,6 +289,7 @@ def build_mediation_request(
                 "request-classification.json",
             ],
             "readImages": images,
+            "imageRoles": image_roles,
             "outputSchema": {
                 "summary": "string",
                 "scope": {"in": ["string"], "out": ["string"]},
@@ -292,6 +316,26 @@ def build_mediation_request(
                         "string — 1-3 ultra-short Graphify CLI keyword strings (max 60 chars)"
                     ],
                 },
+                "visualSpecUnconfirmed": False,
+                "matchExactly": "boolean",
+                "layout": {"regions": [{"id": "string", "type": "string", "confidence": 0.0}]},
+                "components": [
+                    {
+                        "type": "string",
+                        "label": "string",
+                        "text": "string",
+                        "variant": "string",
+                        "colorHint": "string",
+                        "confidence": 0.0,
+                    }
+                ],
+                "visualTokens": {
+                    "colors": [{"value": "string", "context": "string"}],
+                    "typography": [{"element": "string", "size": "string", "weight": "string"}],
+                    "spacing": [{"context": "string", "value": "string"}],
+                },
+                "exactTextRequirements": ["string"],
+                "confidence": "number 0–1",
             },
         }
 
@@ -424,19 +468,26 @@ def build_mediation_request(
         }
 
     if kind == MediationKind.GRAPH_EXPLAIN:
+        # Single LOCATE pass: explain + validate coverage (folded REQ_MAP_VALIDATION).
+        # Query strategy comes from REQUIREMENT_ANALYSIS + deterministic planner.
         return {
             **base,
             "instruction": (
-                "Explain graph query results in plain language. Confirm reuse vs create vs API gaps. "
-                "IMPORTANT: requirementMapAdjustments must structurally correct the map — "
+                "LOCATE (one pass): Explain graph query results and finalize which files matter. "
+                "Confirm reuse vs create vs API gaps. "
+                "requirementMapAdjustments must structurally correct the map — "
                 "use dropPaths / modify / create (not assumptions alone). Always drop "
                 "package.json, project.json, lockfiles, tsconfig, vite config, README. "
-                "Keep only real implementation files (source code, styles, templates — not config)."
+                "Keep only real implementation files.\n\n"
+                "Also validate coverage: for each AC, confirm a modify/create path exists. "
+                "Use coverageAdjustments.addToModify / addToCreate / dropPaths / reorder "
+                "when the map is incomplete."
             ),
             "readArtifacts": [
                 "graph/queries.json",
                 "graph/query-results.json",
                 "graph/requirement-map.json",
+                "graph/query-strategy.json",
                 "requirements.normalized.json",
             ],
             "readImages": images,
@@ -451,6 +502,13 @@ def build_mediation_request(
                     "executionOrder": ["string"],
                 },
                 "acceptanceMappingsReview": [{"acId": "string", "strategy": "string", "approved": True}],
+                "coverageAdjustments": {
+                    "addToModify": [{"path": "string", "purpose": "string"}],
+                    "addToCreate": [{"path": "string", "purpose": "string"}],
+                    "dropPaths": ["string"],
+                    "reorder": ["string"],
+                },
+                "coverageOk": "boolean",
             },
         }
 
@@ -458,44 +516,26 @@ def build_mediation_request(
         return {
             **base,
             "instruction": (
-                "Refine implementation-plan.json for THIS application (any stack/domain — not a "
-                "demo template). Use requirement-map, GRAPH_EXPLAIN, and visuals. "
-                "CRITICAL: for every create/modify that is not a known greenfield scaffold "
-                "templateId, you MUST supply the full file `content` the MCP should write. "
-                "MCP will not invent product-specific CSS/UI/API patches.\n"
-                "SOURCE OF TRUTH: You MUST read inputs/attachments.json and any referenced "
-                "HTML (inputs/page.html), wireframe/mockup images, and design-note markdown. "
-                "Populate plan.sourceOfTruth and visualCompliance.referenceHtml / "
-                "referenceImage / referenceArtifacts with those run-relative paths. Layout, "
-                "tokens, fonts, and copy must follow those artifacts — do not invent a "
-                "competing visual system.\n"
-                "You are NOT allowed to read target-project files yourself, and Graphify's "
-                "graph.json is structural only (imports/declarations) — it has no literal "
-                "source text (no CSS selectors, no JSX body). To solve this, MCP itself read "
-                "the CURRENT text of every modify/reuse/create candidate and put it in "
-                "graph/source-snapshots.json BEFORE this mediation. For any 'modify' entry "
-                "with exists=true there, use that content as the base: apply only the "
-                "requirement's change and return the FULL edited file, preserving unrelated "
-                "code/CSS rules exactly. Never fabricate a full-file replacement for a file "
-                "whose current content you have not read from source-snapshots.json — if an "
-                "entry is missing/truncated/binary there, keep the change minimal and note the "
-                "gap in risks[] instead of guessing.\n"
-                "validationPlan: leave unit paths empty (TEST_GENERATION chooses pytest/"
-                "vitest/junit/…). Include topology, risks, blockers, coverage expectation. "
-                "Output full plan JSON.\n"
-                "DELTA RE-PLAN: if plans/visual-delta.json exists, this is a targeted fix "
-                "after a failed visual-fidelity check — NOT a fresh full re-plan. Read its "
-                "failedSubtasks[] list. Every create/modify action you return MUST set "
-                "subtaskId to one of those failed sub-task IDs. Do NOT touch, re-plan, or "
-                "re-emit files for sub-tasks that already passed — their prior implementation "
-                "stays as-is. Address the specific issues/fixInstructions listed per sub-task, "
-                "not the original ticket from scratch."
+                "Refine implementation-plan.json as INTENT ONLY for THIS application. "
+                "Use requirement-map, locate results, and visuals.\n\n"
+                "CRITICAL — do NOT return full file `content` bodies over MCP. "
+                "For every create/modify supply: path, purpose, and changeSummary "
+                "(what will change). After human approval the IDE agent writes files "
+                "with native Read/Edit/Write tools.\n"
+                "Optional: greenfield scaffold templateId only when scaffolding a new app.\n\n"
+                "SOURCE OF TRUTH: Read inputs/attachments.json and inputs/page.html / images. "
+                "Populate plan.sourceOfTruth and visualCompliance reference paths. "
+                "Do not invent a competing visual system.\n\n"
+                "validationPlan: leave unit paths empty (TEST_GENERATION chooses stack). "
+                "Include topology, risks, blockers, acceptanceMappings, executionOrder.\n\n"
+                "DELTA RE-PLAN: if plans/visual-delta.json exists, scope create/modify to "
+                "failedSubtasks[] only — set subtaskId on every action; do not re-touch "
+                "sub-tasks that already passed."
             ),
             "readArtifacts": [
                 "plans/implementation-plan.json",
                 "plans/subtasks.json",
                 "plans/visual-delta.json",
-                "graph/source-snapshots.json",
                 "graph/requirement-map.json",
                 "graph/mediation-explain.json",
                 "requirements.normalized.json",
@@ -517,8 +557,8 @@ def build_mediation_request(
                     {
                         "path": "string",
                         "purpose": "string",
-                        "templateId": "greenfield.*|omit",
-                        "content": "REQUIRED full file body for real apps (not scaffold)",
+                        "changeSummary": "string — what this new file will contain",
+                        "templateId": "greenfield.*|omit — scaffold only",
                         "root": "default",
                     }
                 ],
@@ -526,8 +566,7 @@ def build_mediation_request(
                     {
                         "path": "string",
                         "purpose": "string",
-                        "patchId": "omit for real apps",
-                        "content": "REQUIRED full file body after your edit",
+                        "changeSummary": "string — concrete edit intent (not full file body)",
                         "root": "default",
                     }
                 ],
@@ -1133,21 +1172,8 @@ def pending_mediations(stage: Stage, run_dir: Path, state: RunState) -> list[tup
                 pending.append((stage, primary))
         else:
             pending.append((stage, primary))
-    # VISUAL_INTERPRETATION: any intake visual SoT (HTML / image / wireframe / mockup).
-    # A real visual reference is concrete evidence — it must trigger interpretation
-    # regardless of classification's early runVisual guess (same rule as
-    # VISUAL_VALIDATE); otherwise an HTML-SoT ticket with runVisual=false gets only
-    # a mechanical htmlDerived visual-spec.json, never real model interpretation.
-    if stage == VISUAL_STAGE:
-        from uiforgemax.pipeline.visual_sot import detect_visual_references
-
-        ref = detect_visual_references(run_dir, state)
-        if ref.get("hasVisualRef") or _input_images(run_dir):
-            pending.append((stage, VISUAL_KIND))
-
-    # REQUIREMENT_MAP: append coverage validation after GRAPH_EXPLAIN
-    if stage == Stage.REQUIREMENT_MAP:
-        pending.append((stage, MediationKind.REQ_MAP_VALIDATION))
+    # Visual SoT is folded into REQUIREMENT_ANALYSIS (no separate VISUAL_INTERPRETATION).
+    # REQ_MAP_VALIDATION is folded into GRAPH_EXPLAIN (no separate pause).
 
     # VISUAL_VALIDATION: fidelity gate for HTML / wireframe / mockup / images
     if stage == Stage.VISUAL_VALIDATE:

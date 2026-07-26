@@ -896,7 +896,12 @@ def write_install_wait(
         if cmd:
             shell_lines.append(cmd)
     if not shell_lines and project_root:
-        shell_lines = [f'cd "{project_root}"', "npm install"]
+        # Stack-agnostic fallback — do not assume npm. Prefer mediated installHints.
+        shell_lines = [
+            f'cd "{project_root}"',
+            "# Install deps for THIS stack (from tests/generated-tests.json installHints), then:",
+            "# say resume / call uiforgemax_advance",
+        ]
     shell_block = "\n".join(shell_lines)
     mins = max(1, int(timeout_sec) // 60)
     payload = {

@@ -12,10 +12,12 @@ def generate_handover(
     diff_summary: dict[str, Any],
     test_results: dict[str, Any],
 ) -> Path:
+    mode = diff_summary.get("mode") or "implement"
     md = f"""# UiForgeMax Delivery Report
 
 ## Summary
-Implementation completed on branch `{diff_summary.get('branch') or 'n/a'}`.
+Implementation completed (`mode={mode}`). MCP does not create git branches —
+review and commit in your workspace when ready.
 
 ## Files changed ({diff_summary.get('fileCount', 0)})
 {chr(10).join('- ' + f for f in diff_summary.get('filesChanged', []))}
@@ -25,9 +27,9 @@ Passed: **{test_results.get('passed')}**
 Attempts: {len(test_results.get('attempts', []))}
 
 ## Next steps
-1. Review the git branch in your workspace
-2. Run full test suite locally
-3. Merge when satisfied
+1. Review `git status` / diff in the workspace
+2. Run the full test suite locally for this stack
+3. Commit / merge when satisfied
 """
     out = run_dir / "handover" / "delivery-report.md"
     out.parent.mkdir(parents=True, exist_ok=True)

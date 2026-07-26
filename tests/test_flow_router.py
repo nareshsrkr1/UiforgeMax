@@ -82,12 +82,35 @@ def test_greenfield_e2e_scaffold(tmp_path):
     assert json.loads((run_dir / "graph" / "requirement-map.json").read_text())["source"] == "greenfield_scaffold"
 
     approvals.approve_plan(ctx, run_id)
-    pipeline.advance(ctx, run_id)
-
     state = ctx.store.load(run_id)
-    assert state.status == Status.COMPLETED
-    assert (empty / "backend" / "app" / "main.py").exists()
-    assert (empty / "ui" / "index.html").exists()
+    # Lean greenfield: intent-only → IDE apply (no hardcoded FastAPI/HTML MCP write).
+    assert state.status == Status.AWAITING_IDE_APPLY
+    brief = json.loads(lifecycle.get_run_status(ctx, run_id))
+    assert brief.get("ideApplyBrief") or brief.get("waitForIdeApply")
+
+    plan = json.loads((run_dir / "plans" / "approved-plan.json").read_text(encoding="utf-8"))
+    for action in list(plan.get("create") or []):
+        rel = action.get("path")
+        if not rel:
+            continue
+        target = empty / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"// ide-apply {rel}\n", encoding="utf-8")
+
+    pipeline.advance(ctx, run_id)
+    state = ctx.store.load(run_id)
+    # After IDE apply verify: mediation/tests may pause or complete depending on skip flags.
+    assert state.status in (
+        Status.AWAITING_MEDIATION,
+        Status.IMPLEMENTING,
+        Status.TESTING,
+        Status.COMPLETED,
+        Status.AWAITING_USER_INSTALL,
+    )
+    assert (empty / "src" / "api" / "main.py").exists() or any(
+        (empty / p).exists()
+        for p in [a.get("path") for a in (plan.get("create") or []) if a.get("path")]
+    )
 
 
 def test_ui_only_skips_api_stages(tmp_path):

@@ -55,7 +55,9 @@ def test_visual_interpretation_pending_despite_run_visual_false(tmp_path: Path):
 
     pending = pending_mediations(Stage.NORMALIZE, run_dir, state)
     kinds = [k.value for _, k in pending]
-    assert "VISUAL_INTERPRETATION" in kinds
+    # Visual SoT folds into REQUIREMENT_ANALYSIS (UNDERSTAND pass).
+    assert "REQUIREMENT_ANALYSIS" in kinds
+    assert "VISUAL_INTERPRETATION" not in kinds
 
 
 # --- #2: delta scope enforced at _gate_plan too (SKIP_MEDIATION safety net) ---
@@ -71,7 +73,8 @@ def test_gate_plan_blocks_out_of_scope_delta_plan(tmp_path: Path):
                 "create": [
                     {
                         "path": "unrelated.py",
-                        "content": "def helper():\n    return 1\n",
+                        "purpose": "out of scope",
+                        "changeSummary": "helper",
                         "subtaskId": "ST-99",
                     }
                 ],
@@ -102,7 +105,8 @@ def test_gate_plan_passes_in_scope_delta_plan(tmp_path: Path):
                 "create": [
                     {
                         "path": "fixed.py",
-                        "content": "def helper():\n    return 1\n",
+                        "purpose": "fix failed subtask",
+                        "changeSummary": "align with visual delta",
                         "subtaskId": "ST-1",
                     }
                 ],
@@ -111,6 +115,13 @@ def test_gate_plan_passes_in_scope_delta_plan(tmp_path: Path):
         ),
         encoding="utf-8",
     )
+    (run_dir / "plans" / "plan-review.json").write_text(
+        json.dumps({"verdict": "pass", "blockers": [], "risks": []}), encoding="utf-8"
+    )
+    (run_dir / "requirements.normalized.json").write_text(
+        json.dumps({"summary": "t", "acceptanceCriteria": []}), encoding="utf-8"
+    )
+    (run_dir / "plans" / "understanding-approval.json").write_text("{}", encoding="utf-8")
     state = ctx.store.load(run_id)
     state.current_stage = Stage.GATE_PLAN
     state.status = Status.PLAN_READY

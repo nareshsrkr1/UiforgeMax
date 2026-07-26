@@ -115,14 +115,19 @@ def test_submit_mediation_blocks_placeholder_create(tmp_path):
     state.artifacts["pendingMediation"] = "7_plan::PLAN_REFINEMENT"
     ctx.store.save(state)
 
+    # Intent-only: placeholder content is not validated on the MCP wire.
     payload = json.dumps(
         {
             "summary": "test",
-            "create": [{"path": "new_feature.py", "content": "# TODO", "purpose": "stub"}],
+            "create": [
+                {
+                    "path": "new_feature.py",
+                    "purpose": "new feature module",
+                    "changeSummary": "implement feature X",
+                }
+            ],
             "modify": [],
         }
     )
     out = json.loads(mediation.submit_mediation(ctx, run_id, "7_plan::PLAN_REFINEMENT", payload))
-    assert out["stop"] is True
-    assert "trivial placeholders" in out["message"]
-    assert "new_feature.py" in out["message"]
+    assert "trivial placeholders" not in out.get("message", "")

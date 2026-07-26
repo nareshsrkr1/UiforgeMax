@@ -1,35 +1,24 @@
-# UiForgeMax Agent — tool allowlist only
+# UiForgeMax Agent — tool allowlist
 
-**MCP-only for the target project.** Use the tools below to drive the pipeline. If
-`uiforgemax_*` MCP tools are unavailable: **STOP** — do not edit the target repo as a
-workaround. Tell the user to enable the `uiforgemax` MCP server and reload.
+**MCP orchestrates (Graphify, gates, verify). The IDE writes product code after plan approval.**
 
-**Never explore/edit the target project** with `Read`/`Glob`/`Grep`/`Shell` — Graphify
-does that inside `uiforgemax_advance`.
+If `uiforgemax_*` tools are unavailable: **STOP** — enable the `uiforgemax` MCP server.
 
-**You MAY and MUST Read these (not a allowlist violation):**
-1. Anything under the MCP **run directory** (`runsDir` in tool JSON), including
-   `mediation/*.request.json`, `graph/source-snapshots.json`, `inputs/page.html`.
-2. If the IDE returns an **oversized MCP tool result as a `content.json` / agent-tools
-   pointer**, **Read that pointer file immediately** — that file *is* the tool result
-   (contains `nextTool` / `modelMediation` / `mediationBrief`). Do not stop and ask the
-   human; do not claim you are blocked from reading it.
+**Before plan approval:** do not wander the target repo to invent the plan — Graphify
+inside `uiforgemax_advance` finds targets. You may Read MCP `runsDir` artifacts.
 
-**Writing full file `content` for PLAN_REFINEMENT modify actions:** Graphify's graph.json is
-structural only (imports/declarations/line hints) — it never carries literal source text (no
-CSS selectors, no JSX body). Before PLAN_REFINEMENT mediation, MCP itself reads the current text
-of every candidate modify/reuse/create file and writes it to `graph/source-snapshots.json` (a
-run-dir artifact — reading it is allowed, same as any other artifact). For a `modify` entry with
-`exists=true` there, use that content as the base and return the full edited file, preserving
-unrelated code. Do **not** fabricate a full-file replacement for a file you have not read from
-`source-snapshots.json` — if an entry is missing/truncated/binary, keep the change minimal and
-flag the gap in `risks[]` instead of guessing.
+**After plan approval (`awaiting_ide_apply` / `ideApplyBrief`):** use IDE
+**Read / Edit / Write** on the listed target paths, then `uiforgemax_advance` to verify.
+Do **not** send full file bodies through `submit_mediation`.
 
-**Evidence = graph only by default.** MCP finds implementation targets via Graphify index +
-short graph queries + lexical scan of `graph.json` nodes — not by walking the filesystem.
-On-disk file discovery (`fs-style-supplement` / focus-path probes) stays **off** unless
-`UIFORGEMAX_ALLOW_FILE_DISCOVERY=1` (use only when graph evidence is empty / implementation
-clearly misses and mediation opts in).
+**PLAN_REFINEMENT = intent only:** `path`, `purpose`, `changeSummary` (and optional
+greenfield `templateId`). No `content` field over MCP.
+
+**Opaque MCP results:** call `uiforgemax_get_run_status` and continue — never stop to
+ask for file-read permission.
+
+**Evidence = graph first.** File discovery stays off unless
+`UIFORGEMAX_ALLOW_FILE_DISCOVERY=1`.
 
 ```
 uiforgemax_preflight
@@ -119,11 +108,10 @@ regardless of IDE; every IDE calls the same MCP tools.
 | Sample FastAPI + React | `…/Project` |
 | Greenfield | empty folder path |
 
-Target project edits happen **only after plan approval** via MCP implement — not by the agent editing files directly during planning.
-
-**Generic product — not demo-shaped.** SCRUM-5 / customer-portal / dark-mode are smoke
-tests only. Real apps may be any stack or domain. PLAN_REFINEMENT must supply full file
-`content` for create/modify; TEST_GENERATION alone chooses pytest/vitest/junit/etc.
+After plan approval (`awaiting_ide_apply`): edit target files with IDE Read/Edit/Write,
+then `uiforgemax_advance` to verify. PLAN_REFINEMENT is intent-only (path/purpose/
+changeSummary) — no full file bodies over MCP. TEST_GENERATION chooses the stack’s
+runner (pytest / vitest / junit / go test / …).
 
 ## Typical session
 
@@ -137,16 +125,10 @@ tests only. Real apps may be any stack or domain. PLAN_REFINEMENT must supply fu
      The IDE model splits work into ordered sub-tasks (visual_regions, ac_grouping,
      dependency_graph, domain_split). Simple requests (≤2 ACs) auto-wrap into ST-ALL
      with no mediation. Sub-tasks drive per-sub-task Graphify queries and structured plans.
-5. Sole human gate: **STOP** at `awaiting_plan_approval` (`waitForHuman: true`,
-   `nextTool` is null). Display `planApproval` fully — including `subtaskBreakdown`
-   when present (strategy, dependency order, per-sub-task files and ACs).
-   **You MUST enumerate every path in `filesToCreate` and `filesToModify` by name,
-   one per line — never summarize as "several files" or omit the list, even if it
-   is long.** This is not optional formatting; the human is approving those exact
-   paths.
-   **Do not** call `approve_plan` until the human explicitly says approve.
-   GATE_API is auto-approved (no longer a human gate). Only GATE_PLAN stops.
-   Then `advance` → implement → post-implement review → visual validate → tests.
+5. Sole human gate: **STOP** at `awaiting_plan_approval`. Enumerate every
+   `filesToCreate` / `filesToModify` path. Do not auto-approve.
+   After approve → `awaiting_ide_apply`: IDE Read/Edit/Write those paths, then
+   `uiforgemax_advance` → verify → post-implement review → visual → tests.
    - Understanding is auto-recorded (no separate approve_understanding).
    - Dev/CI: `UIFORGEMAX_SKIP_PLAN_APPROVAL=1` skips the human gate.
    - VISUAL_VALIDATE stage (after implement, when any visual SoT exists — HTML, wireframe,
@@ -195,16 +177,20 @@ INTAKE → ARCH_DETECT → CLASSIFY → IMAGE_CONVERT
 | TASK_DECOMPOSITION | DECOMPOSE | >2 ACs (skipped for simple). Produces searchContext per sub-task |
 | QUERY_STRATEGY | GRAPH_QUERY_PLAN | Always (IDE sees graph structure + requirements, decides what to search) |
 | GRAPH_EXPLAIN | REQUIREMENT_MAP | When useGraph=true |
-| REQ_MAP_VALIDATION | REQUIREMENT_MAP | Always (coverage check after graph explain) |
-| PLAN_REFINEMENT | PLAN | Always |
-| POST_IMPLEMENT_REVIEW | IMPLEMENT | Always (code + SoT review; `passesReview=false` rewinds to PLAN) |
-| VISUAL_VALIDATION | VISUAL_VALIDATE | When any visual SoT exists (HTML / image / wireframe / mockup) |
-| TEST_GENERATION | TEST | Always (rejects empty/stub tests for UI work) |
+| PLAN_REFINEMENT | PLAN | Always — **intent only** (path/purpose/changeSummary) |
+| POST_IMPLEMENT_REVIEW | IMPLEMENT | After IDE apply / MCP scaffold verify |
+| VISUAL_VALIDATION | VISUAL_VALIDATE | When any visual SoT exists |
+| TEST_GENERATION | TEST | Always |
 | TEST_ENV_RECOVERY | TEST | On env gap |
+
+Lean mediations: **UNDERSTAND** = REQUIREMENT_ANALYSIS (+ visual fields).
+**LOCATE** = GRAPH_EXPLAIN (+ coverage). No separate QUERY_STRATEGY /
+VISUAL_INTERPRETATION / REQ_MAP_VALIDATION pauses.
 
 ## Dynamic flow
 
-After classify, `run-flow.json` skips irrelevant stages (ui_only → no API; greenfield → no graph). Classification JSON may set `useGraph`, `runApi`, `runVisual`, `greenfieldScaffold`. DECOMPOSE always runs (simple requests auto-wrap). VISUAL_VALIDATE runs when `runVisual=true` and any visual SoT exists (HTML, wireframe, mockup, or images) — not image-only. GATE_API is always auto-approved (sole human gate is GATE_PLAN). INTAKE_RECONCILIATION fires at NORMALIZE only when Jira has comments/changelog. REQ_MAP_VALIDATION fires after GRAPH_EXPLAIN. POST_IMPLEMENT_REVIEW fires after every implementation and gates on `passesReview`.
+After classify, `run-flow.json` skips irrelevant stages. Sole human gate is GATE_PLAN.
+After approve → `awaiting_ide_apply` → IDE edits → `advance` verifies → visual/test.
 
 ## Multiple components in one run
 
@@ -228,31 +214,17 @@ reactive path is a fallback for the unexpected case, not the normal flow.
 
 ## Rules
 
-1. **MCP-only** — no Shell/Edit/Grep on the target project until MCP implements after Gate 3.
-2. Follow `nextTool` in every JSON response.
-3. **Stop** if MCP unavailable — do not continue with other tools.
-4. **Preflight first** — every new session.
-5. At human gates, show artifact paths and wait for approval.
-6. At `awaiting_mediation`, use `mediationBrief` / `modelMediation` (or Read
-   `modelMediation.requestFile` under `runsDir`) and call `uiforgemax_submit_mediation`.
-   If the IDE spilled `advance` to a content.json pointer, **Read that pointer** first —
-   it contains `nextTool` / mediation fields. Then Read run-dir `readArtifacts` as needed
-   (`inputs/page.html`, `graph/source-snapshots.json`, etc.).
-7. Images: `uiforgemax_add_image(run_id, path, role)` — `reference|before|after|wireframe|mockup`.
-8. **Never pause to ask "should I continue / advance?"** — drive the pipeline
-   forward on your own. The ONLY places you stop and hand control to the human are:
-   (a) `waitForHuman: true` (the plan-approval gate), (b) `stop: true` in a
-   response, (c) MCP unavailable, or (d) a genuine `BLOCKED`/error you cannot
-   resolve. In every other state — including right after `add_jira`/`add_prompt`,
-   after each mediation `submit`, and between all automated stages — immediately
-   call whatever `nextTool` says (usually `uiforgemax_advance`) without asking
-   permission first. Chaining `add_jira → advance → (mediation) → submit →
-   advance → …` up to the plan gate is the expected, correct behavior, not
-   something to confirm with the human each hop. Do not narrate "if you want, I
-   can continue" — just continue.
-9. **Implement no longer touches git.** MCP only writes files to disk — no branch,
-   no `git add`, no `git commit`. After implement completes, tell the human the
-   files are written and unstaged; they review `git status`/diff and commit
-   themselves whenever they choose.
+1. **Graphify-first before plan** — no target-repo exploration to invent the plan.
+2. **IDE write after plan approval** — Read/Edit/Write listed paths, then `advance`.
+3. Follow `nextTool` in every JSON response.
+4. **Stop** if MCP unavailable.
+5. **Preflight first** — every new session.
+6. At the plan gate, enumerate every path and wait for the human.
+7. At `awaiting_mediation`, use `mediationBrief` + `submit_mediation` (intent JSON only
+   for plans). Opaque advance → **get_run_status first**.
+8. At `awaiting_ide_apply`, use `ideApplyBrief` — edit files, then `advance`.
+9. Images: `uiforgemax_add_image(run_id, path, role)`.
+10. **Never ask "should I continue?"** — drive until plan gate / IDE apply / BLOCKED.
+11. **No git from MCP.** After files change, the human commits when ready.
 
 Call `uiforgemax_get_pipeline_guide` for full stage documentation.

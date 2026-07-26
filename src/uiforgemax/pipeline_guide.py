@@ -11,18 +11,20 @@ PIPELINE_GUIDE = {
         "agentRole": "Tool allowlist only; follow nextTool in JSON responses",
         "graphifyRole": "Deterministic index + query + requirement-map (skipped for greenfield / empty repo)",
         "flowRouter": "run-flow.json — dynamic activeStages from classification (ui_only skips API, greenfield skips graph)",
-        "ideAgentRole": "Mediate judgment at model_mediation pauses; present human gates",
+        "ideAgentRole": (
+            "Mediate judgment; after plan approval write product files with IDE tools "
+            "(awaiting_ide_apply); MCP verifies + runs visual/test gates"
+        ),
         "modelMediation": {
             "tool": "uiforgemax_submit_mediation",
             "skipEnv": "UIFORGEMAX_SKIP_MEDIATION=1",
             "kinds": [
                 "REQUEST_CLASSIFICATION @ 0.6_classify",
-                "REQUIREMENT_ANALYSIS @ 2_normalize",
-                "VISUAL_INTERPRETATION @ 2_normalize (when HTML/image/wireframe/mockup SoT)",
+                "REQUIREMENT_ANALYSIS @ 2_normalize (UNDERSTAND: requirements + visual SoT)",
+                "GRAPH_EXPLAIN @ 4.6_requirement_map (LOCATE: explain + coverage)",
+                "PLAN_REFINEMENT @ 7_plan (intent only — path/purpose/changeSummary)",
+                "POST_IMPLEMENT_REVIEW @ 9_implement",
                 "VISUAL_VALIDATION @ 9.5_visual_validate (any visual SoT)",
-                "POST_IMPLEMENT_REVIEW @ 9_implement (gates on passesReview)",
-                "GRAPH_EXPLAIN @ 4.6_requirement_map",
-                "PLAN_REFINEMENT @ 7_plan",
                 "TEST_GENERATION @ 10_test",
                 "TEST_ENV_RECOVERY @ 10_test (when tool/env gap)",
             ],
@@ -147,21 +149,17 @@ PIPELINE_GUIDE = {
             "tool": "uiforgemax_advance → uiforgemax_submit_mediation",
             "llm": "IDE model (PLAN_REFINEMENT)",
             "description": (
-                "Build implementation-plan from requirement-map; IDE refines with visual compliance. "
-                "Before mediation, MCP itself (not the driving agent) reads the literal CURRENT "
-                "content of every modify/reuse/create candidate file into graph/source-snapshots.json "
-                "— Graphify's graph.json is structural only (no CSS selectors/JSX body/business logic), "
-                "so this is the only safe way for the IDE model to write a correct full-file `content` "
-                "for modify actions without guessing and silently deleting unrelated code. "
-                "A create/modify action may set \"root\" to a name other than the default project_root "
-                "for multi-repo work (e.g. separate ui/api repos not sharing a parent folder). If that "
-                "name isn't registered yet, this stage BLOCKS and asks for uiforgemax_add_workspace_root "
-                "— it never assumes or guesses a path."
+                "Build implementation-plan from requirement-map; IDE refines INTENT ONLY "
+                "(path, purpose, changeSummary). Full file bodies are NOT sent over MCP — "
+                "after human approval the IDE agent writes files with Read/Edit/Write, then "
+                "advance verifies (awaiting_ide_apply). "
+                "A create/modify action may set \"root\" for multi-repo work; missing roots "
+                "BLOCK and ask for uiforgemax_add_workspace_root."
             ),
             "outputs": [
                 "plans/implementation-plan.json",
                 "plans/implementation-plan.md",
-                "graph/source-snapshots.json",
+                "plans/pre-apply-baseline.json (after approve)",
             ],
         },
         {

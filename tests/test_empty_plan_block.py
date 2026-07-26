@@ -45,7 +45,13 @@ def test_build_plan_review_forces_revise_when_empty():
 def test_build_plan_review_passes_with_file_actions():
     review = build_plan_review(
         {
-            "create": [{"path": "src/App.tsx", "content": "export default function App(){return null}\n"}],
+            "create": [
+                {
+                    "path": "src/App.tsx",
+                    "purpose": "app shell",
+                    "changeSummary": "create App component",
+                }
+            ],
             "modify": [],
             "acceptanceMappings": [{"acId": "AC1"}],
         },
@@ -53,9 +59,11 @@ def test_build_plan_review_passes_with_file_actions():
     )
     assert review["verdict"] == "pass"
     assert not review["blockers"]
+    assert review.get("ideApply") is True
 
 
-def test_build_plan_review_revises_when_paths_lack_content():
+def test_build_plan_review_passes_intent_only_without_content():
+    """Path+purpose is enough — IDE writes bodies after approval."""
     review = build_plan_review(
         {
             "create": [],
@@ -63,9 +71,10 @@ def test_build_plan_review_revises_when_paths_lack_content():
             "acceptanceMappings": [],
         }
     )
-    assert review["verdict"] == "revise"
+    assert review["verdict"] == "pass"
     assert review["missingContentPaths"] == ["src/App.tsx"]
-    assert any("content" in b.lower() for b in review["blockers"])
+    assert review.get("ideApply") is True
+    assert not any("intent" in b.lower() for b in review["blockers"])
 
 
 def test_generate_plan_empty_after_sanitize_revises(tmp_path: Path):

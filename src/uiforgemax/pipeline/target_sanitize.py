@@ -52,10 +52,13 @@ _NON_IMPL_NAMES = frozenset(
 )
 
 _IMPL_SUFFIXES = (
-    ".tsx", ".ts", ".jsx", ".js",
+    ".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs",
     ".css", ".scss", ".sass", ".less",
-    ".html", ".vue", ".svelte",
-    ".py", ".go", ".rs", ".java", ".kt", ".cs", ".rb", ".php",
+    ".html", ".htm", ".vue", ".svelte",
+    ".py", ".go", ".rs", ".java", ".kt", ".kts",
+    ".cs", ".fs", ".vb", ".razor", ".cshtml",
+    ".rb", ".erb", ".php", ".swift", ".m", ".mm",
+    ".scala", ".groovy", ".dart", ".ex", ".exs",
 )
 
 

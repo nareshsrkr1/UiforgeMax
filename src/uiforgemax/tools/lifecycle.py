@@ -419,21 +419,32 @@ def get_run_status(ctx: ToolContext, run_id: str) -> str:
     from uiforgemax.pipeline.resume_checkpoint import load_resume_checkpoint
 
     checkpoint = load_resume_checkpoint(run_path)
-    summary = {
-        "runId": state.run_id,
-        "status": state.status.value,
-        "currentStage": state.current_stage.value,
-        "projectRoot": state.project_root,
+    # Keep the wire lean — do not dump full inputs/artifacts into message
+    # (that was a common content.json spill source after opaque advances).
+    extra: dict = {
         "runsDir": str(run_path),
-        "inputs": state.inputs,
-        "policy": state.policy,
-        "compliance": state.compliance.model_dump(),
-        "approvals": state.approvals.model_dump(),
-        "artifacts": state.artifacts,
-        "resumeCheckpoint": checkpoint or None,
+        "projectRoot": state.project_root,
+        "pendingMediation": state.artifacts.get("pendingMediation"),
+        "inputModes": list((state.inputs or {}).get("modes") or []),
+        "recoveryHint": (
+            "Opaque prior tool result? Use this status response's nextTool / "
+            "mediationBrief / planApprovalBrief and continue via MCP tools."
+        ),
     }
-    extra: dict = {}
-    # Attach gate packages so status checks also surface full approval detail.
+    if checkpoint:
+        # Compact checkpoint — drop bulky nested blobs if present.
+        extra["resumeCheckpoint"] = {
+            k: checkpoint.get(k)
+            for k in (
+                "runId",
+                "status",
+                "currentStage",
+                "completedStages",
+                "reason",
+                "updatedAt",
+            )
+            if k in checkpoint
+        } or checkpoint
     if state.status == Status.AWAITING_UNDERSTANDING_APPROVAL:
         from uiforgemax.pipeline.planning import build_understanding_approval_package
 
@@ -441,9 +452,27 @@ def get_run_status(ctx: ToolContext, run_id: str) -> str:
     if state.status == Status.AWAITING_PLAN_APPROVAL:
         from uiforgemax.pipeline.planning import build_plan_approval_package
 
-        extra["planApproval"] = build_plan_approval_package(run_path)
-    if checkpoint:
-        extra["resumeCheckpoint"] = checkpoint
+        pkg = build_plan_approval_package(run_path)
+        (run_path / "plans").mkdir(parents=True, exist_ok=True)
+        (run_path / "plans" / "plan-approval.json").write_text(
+            json.dumps(pkg, indent=2), encoding="utf-8"
+        )
+        # Brief always; full package for human gate (trim may drop it — brief stays).
+        extra["planApprovalBrief"] = {
+            "summary": pkg.get("summary"),
+            "issueKey": pkg.get("issueKey"),
+            "filesToCreate": [
+                (f.get("path") if isinstance(f, dict) else f)
+                for f in (pkg.get("filesToCreate") or [])
+            ][:80],
+            "filesToModify": [
+                (f.get("path") if isinstance(f, dict) else f)
+                for f in (pkg.get("filesToModify") or [])
+            ][:80],
+            "planApprovalFile": "plans/plan-approval.json",
+        }
+        extra["planApproval"] = pkg
+        extra["planApprovalFile"] = "plans/plan-approval.json"
     if state.status == Status.AWAITING_USER_INSTALL:
         from uiforgemax.pipeline.testing import load_install_wait
 
@@ -451,8 +480,27 @@ def get_run_status(ctx: ToolContext, run_id: str) -> str:
     if state.status == Status.AWAITING_MEDIATION:
         from uiforgemax.tools.mediation import mediation_extra
 
-        extra.update(mediation_extra(ctx, state))
-    return tool_response(state, json.dumps(summary, separators=(",", ":")), extra=extra or None)
+        # Lean mediation for recovery after an opaque/spilled advance result.
+        extra.update(mediation_extra(ctx, state, full=True))
+    if state.status == Status.AWAITING_IDE_APPLY:
+        from uiforgemax.pipeline.ide_apply import ide_apply_brief
+
+        plan_path = run_path / "plans" / "approved-plan.json"
+        if not plan_path.exists():
+            plan_path = run_path / "plans" / "implementation-plan.json"
+        plan = {}
+        if plan_path.exists():
+            try:
+                plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                plan = {}
+        extra["ideApplyBrief"] = ide_apply_brief(plan)
+        extra["waitForIdeApply"] = True
+    msg = (
+        f"status={state.status.value} stage={state.current_stage.value} "
+        f"runId={state.run_id}"
+    )
+    return tool_response(state, msg, extra=extra)
 
 
 def cancel_run(ctx: ToolContext, run_id: str, reason: str | None = None) -> str:

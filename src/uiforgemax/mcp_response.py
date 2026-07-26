@@ -27,6 +27,9 @@ def _gate_next(
 
     if status == Status.AWAITING_MEDIATION:
         return "uiforgemax_submit_mediation", ["uiforgemax_get_run_status"], blocked + ["uiforgemax_advance"]
+    if status == Status.AWAITING_IDE_APPLY:
+        # Agent edits target files with IDE tools, then advances for verify/gates.
+        return "uiforgemax_advance", ["uiforgemax_get_run_status"], blocked
     if status == Status.AWAITING_USER_INSTALL:
         # Human finishes npm/pip install; agent resumes with advance (tests-only retry).
         return "uiforgemax_advance", ["uiforgemax_resume_run", "uiforgemax_get_run_status"], blocked
@@ -53,6 +56,9 @@ def _gate_next(
     if status in (Status.PLAN_REVIEWED, Status.AWAITING_PLAN_APPROVAL):
         from uiforgemax.env_flags import skip_plan_approval
 
+        # After human (or env) approval, drive implement / IDE-apply.
+        if state.approvals.plan.approved:
+            return "uiforgemax_advance", ["uiforgemax_get_run_status"], blocked
         # Default: no nextTool — human must approve in chat; agent must not auto-approve.
         # Dev/CI: UIFORGEMAX_SKIP_PLAN_APPROVAL=1 → nextTool stays approve_plan.
         if skip_plan_approval():
@@ -101,8 +107,9 @@ def tool_response(
     if pending and state.status == Status.INTAKE:
         body["suggestedIssueKey"] = pending
     if state.status in (Status.PLAN_REVIEWED, Status.AWAITING_PLAN_APPROVAL):
-        body["humanGate"] = "plan"
-        body["waitForHuman"] = True
+        if not state.approvals.plan.approved:
+            body["humanGate"] = "plan"
+            body["waitForHuman"] = True
     if state.status == Status.AWAITING_USER_INSTALL:
         body["humanGate"] = "install"
         body["waitForHuman"] = True
@@ -113,8 +120,55 @@ def tool_response(
             "stage": "10_test",
             "note": "After local install finishes, advance/resume retries tests only — do not start a new run.",
         }
+    if state.status == Status.AWAITING_IDE_APPLY:
+        body["ideApply"] = True
+        body["waitForIdeApply"] = True
+        body["resumeHint"] = {
+            "say": "advance after edits",
+            "nextTool": "uiforgemax_advance",
+            "runId": state.run_id,
+            "stage": "9_implement",
+            "note": (
+                "Edit approved plan paths with IDE Read/Edit/Write, then call "
+                "uiforgemax_advance to verify and continue."
+            ),
+        }
     if extra:
         body.update(extra)
-    # Compact JSON — indent=2 nearly doubles bytes and pushes Cursor/VS Code MCP
-    # hosts over their tool-result size limit (they then spill to content.json).
+    # Compact JSON + trim budget are a safety net only. Architecture is intent-plan
+    # + IDE apply — do not grow wire embedding; keep payloads brief by design.
+    raw = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+    _WIRE_BUDGET = 48_000
+    if len(raw.encode("utf-8")) <= _WIRE_BUDGET:
+        return raw
+    for heavy in (
+        "modelMediation",
+        "planApproval",
+        "understandingApproval",
+        "runFlow",
+        "artifactContents",
+    ):
+        body.pop(heavy, None)
+    brief = body.get("mediationBrief")
+    if isinstance(brief, dict) and "instructionPreview" in brief:
+        body["mediationBrief"] = {
+            k: brief.get(k)
+            for k in (
+                "mediationKey",
+                "kind",
+                "stage",
+                "submitTool",
+                "requestFile",
+                "runsDir",
+                "recovery",
+            )
+            if k in brief
+        }
+    body["wireTrimmed"] = True
+    body["recoveryHint"] = (
+        body.get("recoveryHint")
+        or "Payload trimmed for MCP host limits. Use mediationBrief / "
+        "planApprovalBrief / nextTool on this response, or call "
+        "uiforgemax_get_run_status, then continue."
+    )
     return json.dumps(body, separators=(",", ":"), ensure_ascii=False)

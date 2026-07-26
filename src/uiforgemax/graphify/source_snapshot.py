@@ -2,7 +2,8 @@
 
 Graphify's graph.json is structural (imports, declarations, line hints) — it never
 carries literal source text (no CSS selectors, no JSX body, no business logic).
-PLAN_REFINEMENT requires the IDE model to supply the full file `content` for every
+Legacy helper (lean architecture no longer requires snapshots for PLAN_REFINEMENT).
+Historically PLAN_REFINEMENT required full file `content` for every
 `modify` action, but the driving agent is forbidden from reading target-project
 files directly (that would defeat the graph-driven flow). MCP itself is already
 allowed to touch target files (Graphify parses them, implement writes them) — so

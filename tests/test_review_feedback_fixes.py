@@ -181,45 +181,56 @@ def test_genuinely_empty_stub_still_rejected(tmp_path: Path):
 
 # --- P3: deterministic backstops apply at _gate_plan, not just submit_mediation ---
 
-def test_gate_plan_blocks_noop_modify_even_without_mediation(tmp_path: Path):
+def test_gate_plan_blocks_missing_intent(tmp_path: Path):
     ctx, run_id, run_dir = _ctx_with_run(tmp_path)
-    (run_dir / "graph").mkdir(parents=True, exist_ok=True)
-    (run_dir / "graph" / "source-snapshots.json").write_text(
+    (run_dir / "plans" / "implementation-plan.json").write_text(
+        json.dumps({"create": [], "modify": [{"path": "a.ts"}]}),
+        encoding="utf-8",
+    )
+    state = ctx.store.load(run_id)
+    state.current_stage = Stage.GATE_PLAN
+    state.status = Status.PLAN_READY
+    ctx.store.save(state)
+
+    result = _gate_plan(ctx, state)
+    assert result.stop is True
+    assert "intent" in result.message.lower() or "purpose" in result.message.lower()
+    assert state.status == Status.BLOCKED
+
+
+def test_gate_plan_opens_human_gate_for_intent_only(tmp_path: Path):
+    ctx, run_id, run_dir = _ctx_with_run(tmp_path)
+    (run_dir / "plans" / "implementation-plan.json").write_text(
         json.dumps(
-            {"files": {"default:a.ts": {"path": "a.ts", "root": "default", "exists": True, "content": "x = 1\n"}}}
+            {
+                "create": [
+                    {
+                        "path": "new.ts",
+                        "purpose": "new module",
+                        "changeSummary": "export helper",
+                    }
+                ],
+                "modify": [],
+            }
         ),
         encoding="utf-8",
     )
-    (run_dir / "plans" / "implementation-plan.json").write_text(
-        json.dumps({"create": [], "modify": [{"path": "a.ts", "content": "x = 1\n"}]}),
-        encoding="utf-8",
+    # Minimal artifacts for plan approval package.
+    (run_dir / "plans" / "plan-review.json").write_text(
+        json.dumps({"verdict": "pass", "blockers": [], "risks": []}), encoding="utf-8"
     )
+    (run_dir / "requirements.normalized.json").write_text(
+        json.dumps({"summary": "t", "acceptanceCriteria": []}), encoding="utf-8"
+    )
+    (run_dir / "plans" / "understanding-approval.json").write_text("{}", encoding="utf-8")
     state = ctx.store.load(run_id)
     state.current_stage = Stage.GATE_PLAN
     state.status = Status.PLAN_READY
     ctx.store.save(state)
 
     result = _gate_plan(ctx, state)
+    assert state.status == Status.AWAITING_PLAN_APPROVAL
     assert result.stop is True
-    assert "IDENTICAL to the original" in result.message
-    assert state.status == Status.BLOCKED
-
-
-def test_gate_plan_blocks_placeholder_create_even_without_mediation(tmp_path: Path):
-    ctx, run_id, run_dir = _ctx_with_run(tmp_path)
-    (run_dir / "plans" / "implementation-plan.json").write_text(
-        json.dumps({"create": [{"path": "new.ts", "content": "// TODO"}], "modify": []}),
-        encoding="utf-8",
-    )
-    state = ctx.store.load(run_id)
-    state.current_stage = Stage.GATE_PLAN
-    state.status = Status.PLAN_READY
-    ctx.store.save(state)
-
-    result = _gate_plan(ctx, state)
-    assert result.stop is True
-    assert "trivial placeholders" in result.message
-    assert state.status == Status.BLOCKED
 
 
 def test_gate_plan_passes_genuine_plan(tmp_path: Path):
@@ -227,12 +238,26 @@ def test_gate_plan_passes_genuine_plan(tmp_path: Path):
     (run_dir / "plans" / "implementation-plan.json").write_text(
         json.dumps(
             {
-                "create": [{"path": "new.ts", "content": "export const real = () => 1;\n"}],
+                "create": [
+                    {
+                        "path": "new.ts",
+                        "purpose": "real module",
+                        "changeSummary": "export const real = () => 1",
+                        "content": "export const real = () => 1;\n",
+                    }
+                ],
                 "modify": [],
             }
         ),
         encoding="utf-8",
     )
+    (run_dir / "plans" / "plan-review.json").write_text(
+        json.dumps({"verdict": "pass", "blockers": [], "risks": []}), encoding="utf-8"
+    )
+    (run_dir / "requirements.normalized.json").write_text(
+        json.dumps({"summary": "t", "acceptanceCriteria": []}), encoding="utf-8"
+    )
+    (run_dir / "plans" / "understanding-approval.json").write_text("{}", encoding="utf-8")
     state = ctx.store.load(run_id)
     state.current_stage = Stage.GATE_PLAN
     state.status = Status.PLAN_READY

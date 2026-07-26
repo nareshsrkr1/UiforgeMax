@@ -98,6 +98,7 @@ class Status(str, Enum):
     PLAN_READY = "plan_ready"
     PLAN_REVIEWED = "plan_reviewed"
     AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
+    AWAITING_IDE_APPLY = "awaiting_ide_apply"
     IMPLEMENTING = "implementing"
     TESTING = "testing"
     AWAITING_USER_INSTALL = "awaiting_user_install"

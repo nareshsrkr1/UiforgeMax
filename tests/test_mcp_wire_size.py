@@ -40,7 +40,33 @@ def test_wire_mediation_skips_embeds_by_default(tmp_path: Path, monkeypatch):
     assert wire is not None
     assert "artifactContents" not in wire
     assert wire["requestFile"].endswith(".request.json")
-    assert "content.json" in wire["readHint"]
+    assert "get_run_status" in (wire.get("recovery") or "")
+
+
+def test_tool_response_trims_over_budget():
+    state = RunState(run_id="r1", status=Status.AWAITING_MEDIATION)
+    huge = {"blob": "y" * 80_000}
+    raw = tool_response(
+        state,
+        "x",
+        stop=True,
+        extra={
+            "modelMediation": huge,
+            "mediationBrief": {
+                "kind": "X",
+                "mediationKey": "k",
+                "submitTool": "uiforgemax_submit_mediation",
+                "instructionPreview": "z" * 500,
+            },
+            "runsDir": "/r",
+        },
+    )
+    body = json.loads(raw)
+    assert "modelMediation" not in body
+    assert body.get("wireTrimmed") is True
+    assert body["mediationBrief"]["kind"] == "X"
+    assert "instructionPreview" not in body["mediationBrief"]
+    assert body["nextTool"] == "uiforgemax_submit_mediation"
 
 
 def test_inline_artifacts_opt_in(tmp_path: Path, monkeypatch):

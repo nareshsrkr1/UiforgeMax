@@ -179,6 +179,20 @@ The only human stop is plan approval.
 
 ---
 
+## Lean architecture (intent plan + IDE apply)
+
+- `PLAN_REFINEMENT` returns **path/purpose/changeSummary** only — not full file bodies.
+- After `approve_plan`, status is `awaiting_ide_apply`: the agent edits target files
+  with IDE tools, then `uiforgemax_advance` verifies and continues visual/test.
+- Wire-size / `content.json` spill handling remains a safety net only.
+
+## If the agent stops on a `content.json` pointer (opaque MCP result)
+
+Call `uiforgemax_get_run_status` and continue. If it still stops: pull latest,
+`pip install -e .`, restart MCP, refresh agent rules, fresh chat.
+
+---
+
 ## If graphify update is slow / times out (office machine)
 
 Every graphify run now writes a live log you can watch in a SECOND terminal:

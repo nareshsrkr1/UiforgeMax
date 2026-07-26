@@ -187,8 +187,9 @@ def test_mediation_pauses_at_classify_first(monkeypatch, tmp_path):
     data = json.loads(out)
     assert data["status"] == Status.AWAITING_MEDIATION.value
     assert data["nextTool"] == "uiforgemax_submit_mediation"
-    assert "modelMediation" in data
-    assert data["modelMediation"]["kind"] == "REQUEST_CLASSIFICATION"
+    # Advance is brief-only; full wire is via get_run_status when needed.
+    assert "mediationBrief" in data
+    assert data["mediationBrief"]["kind"] == "REQUEST_CLASSIFICATION"
 
     run_dir = ctx.store.run_dir(run_id)
     assert (run_dir / "classification-signals.json").exists()

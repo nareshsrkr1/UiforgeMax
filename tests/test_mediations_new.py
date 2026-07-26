@@ -45,9 +45,11 @@ def test_new_kinds_exist():
     assert MediationKind.POST_IMPLEMENT_REVIEW == "POST_IMPLEMENT_REVIEW"
 
 
-def test_query_strategy_in_mediation_by_stage():
-    assert Stage.GRAPH_QUERY_PLAN in MEDIATION_BY_STAGE
-    assert MEDIATION_BY_STAGE[Stage.GRAPH_QUERY_PLAN] == MediationKind.QUERY_STRATEGY
+def test_query_strategy_not_in_mediation_by_stage():
+    """Lean cut: QUERY_STRATEGY folded into requirements + deterministic planner."""
+    assert Stage.GRAPH_QUERY_PLAN not in MEDIATION_BY_STAGE
+    assert Stage.REQUIREMENT_MAP in MEDIATION_BY_STAGE
+    assert MEDIATION_BY_STAGE[Stage.REQUIREMENT_MAP] == MediationKind.GRAPH_EXPLAIN
 
 
 # --- INTAKE_RECONCILIATION ---
@@ -136,7 +138,7 @@ def test_merge_intake_reconciliation(tmp_path):
 
 # --- QUERY_STRATEGY ---
 
-def test_query_strategy_pending_at_graph_query_plan(tmp_path):
+def test_query_strategy_not_pending_at_graph_query_plan(tmp_path):
     run_dir = _run_dir(tmp_path)
     state = _state()
     _write(run_dir / "requirements.normalized.json", {"summary": "test", "acceptanceCriteria": []})
@@ -145,7 +147,7 @@ def test_query_strategy_pending_at_graph_query_plan(tmp_path):
 
     pending = pending_mediations(Stage.GRAPH_QUERY_PLAN, run_dir, state)
     kinds = [k for _, k in pending]
-    assert MediationKind.QUERY_STRATEGY in kinds
+    assert MediationKind.QUERY_STRATEGY not in kinds
 
 
 def test_build_query_strategy_request(tmp_path):
@@ -178,7 +180,7 @@ def test_merge_query_strategy(tmp_path):
 
 # --- REQ_MAP_VALIDATION ---
 
-def test_req_map_validation_pending_at_requirement_map(tmp_path):
+def test_req_map_validation_folded_into_graph_explain(tmp_path):
     run_dir = _run_dir(tmp_path)
     state = _state()
     _write(run_dir / "requirements.normalized.json", {"summary": "test", "acceptanceCriteria": []})
@@ -188,10 +190,9 @@ def test_req_map_validation_pending_at_requirement_map(tmp_path):
     pending = pending_mediations(Stage.REQUIREMENT_MAP, run_dir, state)
     kinds = [k for _, k in pending]
     assert MediationKind.GRAPH_EXPLAIN in kinds
-    assert MediationKind.REQ_MAP_VALIDATION in kinds
-    idx_explain = kinds.index(MediationKind.GRAPH_EXPLAIN)
-    idx_valid = kinds.index(MediationKind.REQ_MAP_VALIDATION)
-    assert idx_explain < idx_valid
+    assert MediationKind.REQ_MAP_VALIDATION not in kinds
+    req = build_mediation_request(Stage.REQUIREMENT_MAP, MediationKind.GRAPH_EXPLAIN, run_dir, state)
+    assert "coverageAdjustments" in req["outputSchema"]
 
 
 def test_merge_req_map_validation_adds_files(tmp_path):

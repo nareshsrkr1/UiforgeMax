@@ -140,16 +140,23 @@ def test_submit_mediation_blocks_noop_plan_refinement(tmp_path):
     state.artifacts["pendingMediation"] = "7_plan::PLAN_REFINEMENT"
     ctx.store.save(state)
 
+    # Intent-only: identical content is no longer a mediation blocker.
+    # IDE apply verifies real edits after approval.
     payload = json.dumps(
         {
             "summary": "test",
             "create": [],
-            "modify": [{"path": "main.py", "content": "x = 1\n", "purpose": "no-op"}],
+            "modify": [
+                {
+                    "path": "main.py",
+                    "purpose": "adjust constant",
+                    "changeSummary": "change x to 2",
+                }
+            ],
         }
     )
     out = json.loads(
         mediation.submit_mediation(ctx, run_id, "7_plan::PLAN_REFINEMENT", payload)
     )
-    assert out["stop"] is True
-    assert "IDENTICAL to the original" in out["message"]
-    assert "main.py" in out["message"]
+    assert "IDENTICAL to the original" not in out.get("message", "")
+    assert out.get("status") != "blocked" or "intent" not in out.get("message", "").lower()

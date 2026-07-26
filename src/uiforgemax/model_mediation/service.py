@@ -241,6 +241,21 @@ def _merge_requirements(run_dir: Path, payload: dict[str, Any]) -> None:
             req["dataNeeds"] = []
     req["mediatedByIde"] = True
     _write_json(path, req)
+    # Folded VISUAL_INTERPRETATION: visual fields on the same UNDERSTAND payload.
+    visual_keys = (
+        "layout",
+        "components",
+        "visualTokens",
+        "exactTextRequirements",
+        "matchExactly",
+        "beforeAfterDiff",
+        "sourceImage",
+        "visualSpecUnconfirmed",
+        "confidence",
+        "interactions",
+    )
+    if any(k in payload for k in visual_keys):
+        _merge_visual(run_dir, {k: payload[k] for k in visual_keys if k in payload})
 
 
 def _merge_visual(run_dir: Path, payload: dict[str, Any]) -> None:
@@ -320,6 +335,32 @@ def _merge_graph_explain(run_dir: Path, payload: dict[str, Any]) -> None:
     req_map["mediatedByIde"] = True
     _write_json(map_path, req_map)
 
+    # Folded REQ_MAP_VALIDATION / optional query strategy on the same LOCATE payload.
+    if payload.get("coverageAdjustments") or payload.get("coverageOk") is not None:
+        _merge_req_map_validation(
+            run_dir,
+            {
+                "adjustments": payload.get("coverageAdjustments") or {},
+                "coverageOk": payload.get("coverageOk"),
+            },
+        )
+    if payload.get("queries") or payload.get("lexicalKeywords"):
+        _merge_query_strategy(
+            run_dir,
+            {
+                k: payload[k]
+                for k in (
+                    "queries",
+                    "lexicalKeywords",
+                    "focusFiles",
+                    "strategy",
+                    "refinedFromRequirements",
+                    "adjustments",
+                )
+                if k in payload
+            },
+        )
+
     # Refresh understanding so Gate 2 reflects corrected targets automatically.
     try:
         from uiforgemax.pipeline.planning import generate_understanding
@@ -330,6 +371,8 @@ def _merge_graph_explain(run_dir: Path, payload: dict[str, Any]) -> None:
             if (run_dir / "api-resolution.json").exists()
             else {"resolution": [], "gate1Required": False}
         )
+        # Re-load map after coverage adjustments.
+        req_map = _load_json(map_path)
         generate_understanding(run_dir, reqs, req_map, api)
     except Exception:  # noqa: BLE001
         pass

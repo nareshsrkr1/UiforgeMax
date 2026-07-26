@@ -115,7 +115,13 @@ def test_pending_visual_mediation_for_html(tmp_path: Path):
     state = _state(["html"])
     pending = pending_mediations(Stage.NORMALIZE, tmp_path, state)
     kinds = [k for _, k in pending]
-    assert MediationKind.VISUAL_INTERPRETATION in kinds
+    # Visual SoT folds into REQUIREMENT_ANALYSIS (no separate VISUAL_INTERPRETATION pause).
+    assert MediationKind.REQUIREMENT_ANALYSIS in kinds
+    assert MediationKind.VISUAL_INTERPRETATION not in kinds
+    req = build_mediation_request(
+        Stage.NORMALIZE, MediationKind.REQUIREMENT_ANALYSIS, tmp_path, state
+    )
+    assert "exactTextRequirements" in req["outputSchema"]
 
     pending_v = pending_mediations(Stage.VISUAL_VALIDATE, tmp_path, state)
     assert MediationKind.VISUAL_VALIDATION in [k for _, k in pending_v]
