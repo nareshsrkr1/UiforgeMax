@@ -448,7 +448,11 @@ def get_run_status(ctx: ToolContext, run_id: str) -> str:
         from uiforgemax.pipeline.testing import load_install_wait
 
         extra["installWait"] = load_install_wait(run_path)
-    return tool_response(state, json.dumps(summary, indent=2), extra=extra or None)
+    if state.status == Status.AWAITING_MEDIATION:
+        from uiforgemax.tools.mediation import mediation_extra
+
+        extra.update(mediation_extra(ctx, state))
+    return tool_response(state, json.dumps(summary, separators=(",", ":")), extra=extra or None)
 
 
 def cancel_run(ctx: ToolContext, run_id: str, reason: str | None = None) -> str:

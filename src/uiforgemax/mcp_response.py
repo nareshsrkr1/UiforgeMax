@@ -115,4 +115,6 @@ def tool_response(
         }
     if extra:
         body.update(extra)
-    return json.dumps(body, indent=2)
+    # Compact JSON — indent=2 nearly doubles bytes and pushes Cursor/VS Code MCP
+    # hosts over their tool-result size limit (they then spill to content.json).
+    return json.dumps(body, separators=(",", ":"), ensure_ascii=False)

@@ -8,8 +8,8 @@ from pathlib import Path
 from uiforgemax.mcp_response import tool_response
 from uiforgemax.model_mediation.registry import (
     MediationKind,
-    attach_artifact_contents,
     build_mediation_request,
+    wire_model_mediation,
 )
 from uiforgemax.model_mediation.service import (
     apply_mediation,
@@ -216,7 +216,7 @@ def submit_mediation(
             f"Mediation saved. Next IDE mediation required: {kind.value}",
             stop=True,
             extra={
-                "modelMediation": attach_artifact_contents(request, run_dir),
+                "modelMediation": wire_model_mediation(request, run_dir),
                 "runsDir": str(run_dir),
             },
         )
@@ -239,7 +239,17 @@ def mediation_extra(ctx: ToolContext, state) -> dict:
     request = state.mediation.get("pending") or load_mediation_request(run_dir, key)
     extra: dict = {"runsDir": str(run_dir)}
     if request:
-        extra["modelMediation"] = attach_artifact_contents(request, run_dir)
+        extra["modelMediation"] = wire_model_mediation(request, run_dir)
+        # Tiny always-inline brief so nextTool/mediationKey survive even if the
+        # host truncates nested modelMediation.
+        extra["mediationBrief"] = {
+            "mediationKey": request.get("mediationKey"),
+            "kind": request.get("kind"),
+            "stage": request.get("stage"),
+            "submitTool": "uiforgemax_submit_mediation",
+            "requestFile": (extra["modelMediation"] or {}).get("requestFile"),
+            "readArtifacts": request.get("readArtifacts") or [],
+        }
     return extra
 
 

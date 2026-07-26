@@ -70,7 +70,10 @@ def advance(ctx: ToolContext, run_id: str) -> str:
             if state.status == Status.AWAITING_PLAN_APPROVAL and "planApproval" not in extra:
                 from uiforgemax.pipeline.planning import build_plan_approval_package
 
-                extra["planApproval"] = build_plan_approval_package(run_dir)
+                # Keep wire small: full package is also written under plans/.
+                pkg = build_plan_approval_package(run_dir)
+                extra["planApproval"] = pkg
+                extra["planApprovalFile"] = "plans/plan-approval.json"
             return tool_response(
                 state,
                 "advance log:\n" + "\n".join(log),

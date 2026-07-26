@@ -78,23 +78,30 @@ def _mediation_key(stage: Stage, kind: MediationKind) -> str:
     return f"{stage.value}::{kind.value}"
 
 
-_EMBED_MAX_BYTES = 60_000
+# Per-file embed cap (only when UIFORGEMAX_INLINE_ARTIFACTS=1). Kept small so
+# Cursor/VS Code MCP hosts do not spill the whole tool result to content.json.
+_EMBED_MAX_BYTES = 8_000
+_EMBED_TOTAL_BUDGET = 24_000
 _EMBED_SUFFIXES = {".json", ".txt", ".md"}
 
 
-def attach_artifact_contents(request: dict[str, Any], run_dir: Path) -> dict[str, Any]:
-    """Return a copy of ``request`` with SMALL readArtifacts inlined under
-    ``artifactContents``, so the driving agent does not need a separate
-    (permission-prompting) file Read for each one.
+def _inline_artifacts_enabled() -> bool:
+    import os
 
-    Only small text/JSON artifacts are embedded (``_EMBED_MAX_BYTES`` cap,
-    ``_EMBED_SUFFIXES`` only) — large files like ``inputs/page.html`` and big
-    ``graph/source-snapshots.json`` stay as paths (a single Read each, not
-    part of the many-small-JSON prompt storm). The saved-to-disk request is
-    left lean; only the agent-facing copy is enriched.
+    return os.getenv("UIFORGEMAX_INLINE_ARTIFACTS", "").lower() in ("1", "true", "yes")
+
+
+def attach_artifact_contents(request: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+    """Optionally inline SMALL readArtifacts under ``artifactContents``.
+
+    Default is **off** (wire stays lean). Enable with ``UIFORGEMAX_INLINE_ARTIFACTS=1``.
+    Large HTML / source-snapshots stay as paths either way — Read them from ``runsDir``.
     """
+    if not _inline_artifacts_enabled():
+        return request
     paths = request.get("readArtifacts") or []
     contents: dict[str, str] = {}
+    total = 0
     for rel in paths:
         if not isinstance(rel, str):
             continue
@@ -104,9 +111,11 @@ def attach_artifact_contents(request: dict[str, Any], run_dir: Path) -> dict[str
                 continue
             if target.suffix.lower() not in _EMBED_SUFFIXES:
                 continue
-            if target.stat().st_size > _EMBED_MAX_BYTES:
+            size = target.stat().st_size
+            if size > _EMBED_MAX_BYTES or total + size > _EMBED_TOTAL_BUDGET:
                 continue
             contents[rel] = target.read_text(encoding="utf-8")
+            total += size
         except OSError:
             continue
     if not contents:
@@ -119,6 +128,35 @@ def attach_artifact_contents(request: dict[str, Any], run_dir: Path) -> dict[str
         "artifactContents (large files like inputs/page.html or source snapshots)."
     )
     return enriched
+
+
+def wire_model_mediation(request: dict[str, Any] | None, run_dir: Path) -> dict[str, Any] | None:
+    """Agent-facing mediation payload sized for MCP hosts (avoid content.json spill).
+
+    Keeps instruction / schema / paths. Does not dump huge artifact bodies by default.
+    Points the agent at the on-disk request file + runsDir for any Reads.
+    """
+    if not request:
+        return None
+    key = str(request.get("mediationKey") or "pending")
+    safe = key.replace("::", "_").replace("/", "_")
+    request_rel = f"mediation/{safe}.request.json"
+    wire = attach_artifact_contents(dict(request), run_dir)
+    wire["runsDir"] = str(run_dir)
+    wire["requestFile"] = request_rel
+    wire["requestFileAbs"] = str(run_dir / request_rel)
+    wire["readHint"] = (
+        "Read artifacts under runsDir (MCP run folder — allowed). "
+        "If the IDE spilled this tool result to a content.json pointer, Read that "
+        "pointer file — it IS the tool result, not target-project exploration. "
+        f"Full mediation request also at {request_rel}."
+    )
+    # Cap instruction length on the wire; full text remains in requestFile.
+    instr = wire.get("instruction")
+    if isinstance(instr, str) and len(instr) > 6_000:
+        wire["instruction"] = instr[:6_000] + "\n…[truncated — see requestFile for full instruction]"
+        wire["instructionTruncated"] = True
+    return wire
 
 
 def build_mediation_request(

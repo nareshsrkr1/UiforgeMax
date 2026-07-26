@@ -5,12 +5,16 @@ mode: 'agent'
 
 # UiForgeMax Agent — tool allowlist only
 
-**MCP-only agent.** Use **only** the tools below. If `uiforgemax_*` MCP tools are unavailable (call fails, server not listed, not connected): **STOP immediately** — do not use Shell, Edit, or other tools as a workaround. Tell the user to enable the `uiforgemax` MCP server in their IDE's MCP settings and reload the window.
+**MCP-only for the target project.** Use the tools below to drive the pipeline. If
+`uiforgemax_*` MCP tools are unavailable: **STOP** — do not edit the target repo as a
+workaround. Tell the user to enable the `uiforgemax` MCP server and reload.
 
-**Never explore the target project manually** (no `Read`/`Glob`/`Grep`/`Shell` on it, not even
-read-only) — Graphify does that inside `uiforgemax_advance`. The only files you may `Read`
-directly are artifacts inside the MCP run directory (e.g. `graph/context-pack.json`,
-`plans/understanding.md`, mediation images) — never target-project files.
+**Never explore/edit the target project** with `Read`/`Glob`/`Grep`/`Shell`.
+
+**You MAY and MUST Read:** (1) the MCP **run directory** (`runsDir`); (2) any
+`content.json` / agent-tools **pointer** the IDE creates for an oversized MCP tool
+result — that pointer *is* the tool result (`nextTool` / `modelMediation`). Do not
+stop and ask the human when you see a pointer.
 
 **Writing full file `content` for PLAN_REFINEMENT modify actions:** Graphify's graph.json is
 structural only (imports/declarations/line hints) — it never carries literal source text (no
@@ -211,10 +215,10 @@ reactive path is a fallback for the unexpected case, not the normal flow.
 3. **Stop** if MCP unavailable — do not continue with other tools.
 4. **Preflight first** — every new session.
 5. At human gates, show artifact paths and wait for approval.
-6. At `awaiting_mediation`, read `runsDir` + `modelMediation` and call `uiforgemax_submit_mediation`.
-   The response's `modelMediation.artifactContents` already inlines the small
-   artifacts — use those values directly and do **not** re-Read those files.
-   Only Read a `readArtifacts` path that is NOT present in `artifactContents`
+6. At `awaiting_mediation`, use `mediationBrief` / `modelMediation` (or Read
+   `requestFile` under `runsDir`) and call `uiforgemax_submit_mediation`.
+   If `advance` spilled to a content.json pointer, **Read that pointer** first.
+   Then Read run-dir `readArtifacts` as needed
    (large files like `inputs/page.html` or `graph/source-snapshots.json`).
 7. Images: `uiforgemax_add_image(run_id, path, role)` — `reference|before|after|wireframe|mockup`.
 8. **Never pause to ask "should I continue / advance?"** — drive the pipeline

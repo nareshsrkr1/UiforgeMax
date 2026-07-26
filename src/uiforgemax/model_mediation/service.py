@@ -8,7 +8,7 @@ from typing import Any
 
 from uiforgemax.model_mediation.registry import (
     MediationKind,
-    attach_artifact_contents,
+    wire_model_mediation,
     build_mediation_request,
     pending_mediations,
     skip_mediation,
@@ -111,9 +111,8 @@ def mediation_pause_result(
     state.artifacts["pendingMediation"] = request["mediationKey"]
     state.mediation["pending"] = request
     state.record(stage, "awaiting_mediation", kind.value)
-    # Return an enriched copy (small artifacts inlined) for the agent response;
-    # the saved file and state.mediation stay lean.
-    return True, attach_artifact_contents(request, run_dir)
+    # Return a wire-sized copy for the agent response; full request is on disk.
+    return True, wire_model_mediation(request, run_dir)
 
 
 def apply_mediation(run_dir: Path, kind: MediationKind, payload: dict[str, Any]) -> None:

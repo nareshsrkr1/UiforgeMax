@@ -395,11 +395,22 @@ def test_resolve_payload_invalid_inline_json(tmp_path):
     assert "valid JSON" in err
 
 
-# --- Artifact-content embedding (avoids per-file Read approval prompts) ---
+# --- Artifact-content embedding (opt-in via UIFORGEMAX_INLINE_ARTIFACTS=1) ---
 
-def test_attach_artifact_contents_inlines_small_json(tmp_path):
+def test_attach_artifact_contents_off_by_default(tmp_path, monkeypatch):
     from uiforgemax.model_mediation.registry import attach_artifact_contents
 
+    monkeypatch.delenv("UIFORGEMAX_INLINE_ARTIFACTS", raising=False)
+    (tmp_path / "requirements.normalized.json").write_text('{"a": 1}', encoding="utf-8")
+    request = {"readArtifacts": ["requirements.normalized.json"]}
+    enriched = attach_artifact_contents(request, tmp_path)
+    assert "artifactContents" not in enriched
+
+
+def test_attach_artifact_contents_inlines_small_json(tmp_path, monkeypatch):
+    from uiforgemax.model_mediation.registry import attach_artifact_contents
+
+    monkeypatch.setenv("UIFORGEMAX_INLINE_ARTIFACTS", "1")
     (tmp_path / "requirements.normalized.json").write_text('{"a": 1}', encoding="utf-8")
     request = {"readArtifacts": ["requirements.normalized.json"]}
     enriched = attach_artifact_contents(request, tmp_path)
@@ -407,9 +418,10 @@ def test_attach_artifact_contents_inlines_small_json(tmp_path):
     assert "artifactContentsNote" in enriched
 
 
-def test_attach_artifact_contents_skips_large_files(tmp_path):
+def test_attach_artifact_contents_skips_large_files(tmp_path, monkeypatch):
     from uiforgemax.model_mediation.registry import attach_artifact_contents, _EMBED_MAX_BYTES
 
+    monkeypatch.setenv("UIFORGEMAX_INLINE_ARTIFACTS", "1")
     big = tmp_path / "big.json"
     big.write_text("x" * (_EMBED_MAX_BYTES + 1), encoding="utf-8")
     request = {"readArtifacts": ["big.json"]}
@@ -417,16 +429,17 @@ def test_attach_artifact_contents_skips_large_files(tmp_path):
     assert "artifactContents" not in enriched
 
 
-def test_attach_artifact_contents_skips_non_text_suffixes(tmp_path):
+def test_attach_artifact_contents_skips_non_text_suffixes(tmp_path, monkeypatch):
     from uiforgemax.model_mediation.registry import attach_artifact_contents
 
+    monkeypatch.setenv("UIFORGEMAX_INLINE_ARTIFACTS", "1")
     (tmp_path / "page.html").write_text("<html></html>", encoding="utf-8")
     request = {"readArtifacts": ["page.html"]}
     enriched = attach_artifact_contents(request, tmp_path)
     assert "artifactContents" not in enriched
 
 
-def test_attach_artifact_contents_skips_missing_files(tmp_path):
+def test_attach_artifact_contents_skips_missing_files(tmp_path, monkeypatch):
     from uiforgemax.model_mediation.registry import attach_artifact_contents
 
     request = {"readArtifacts": ["does-not-exist.json"]}

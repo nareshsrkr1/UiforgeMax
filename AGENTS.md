@@ -1,6 +1,13 @@
 # UiForgeMax — Driving Agent
 
-**MCP-only.** Use only `uiforgemax_*` tools. If MCP is not connected, **stop** — do not use other tools.
+**MCP-only for the target project.** Drive the pipeline with `uiforgemax_*` tools.
+If MCP is not connected, **stop** — do not edit the target repo as a workaround.
+
+**Allowed Reads (not a violation):** (1) files under the MCP **run directory**
+(`runsDir`, e.g. `%APPDATA%\UiForgeMax\runs\<runId>\`); (2) if the IDE spills an
+oversized MCP tool result to a `content.json` / agent-tools pointer, **Read that
+pointer** — it *is* the tool result. Never explore/edit the **target project** with
+Read/Glob/Shell.
 
 ## Every session
 
@@ -20,10 +27,9 @@
 
 Follow `nextTool` in each JSON response. Do not edit project files directly — MCP implements after the sole plan approval.
 
-At **`awaiting_mediation`**, use your IDE model + `uiforgemax_submit_mediation`.
-The response's `modelMediation.artifactContents` inlines the small artifacts — use
-those directly, do **not** re-Read those files. Only Read a `readArtifacts` path
-that is absent from `artifactContents` (large files like HTML / source snapshots).
+At **`awaiting_mediation`**, use `mediationBrief` / `modelMediation` (or Read
+`modelMediation.requestFile` under `runsDir`) + `uiforgemax_submit_mediation`.
+If `advance` returns only a content.json pointer, Read it, then continue.
 
 ## Do not pause to ask — just drive the pipeline
 
