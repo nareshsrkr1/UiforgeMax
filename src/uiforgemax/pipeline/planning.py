@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -333,6 +334,152 @@ def plan_actions_missing_content(plan: dict[str, Any] | None) -> list[str]:
 def plan_is_implementable(plan: dict[str, Any] | None) -> bool:
     """Non-empty create/modify AND every action has content or a known scaffold id."""
     return plan_has_file_actions(plan) and not plan_actions_missing_content(plan)
+
+
+def _normalize_for_diff(text: str) -> str:
+    """Line-ending/trailing-whitespace-insensitive form for no-op comparison."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return "\n".join(line.rstrip() for line in lines).strip()
+
+
+_PLACEHOLDER_ONLY_RE = re.compile(
+    r"^\s*(//|#|/\*|\*)?\s*(TODO|TBD|FIXME|placeholder|not\s+implemented|"
+    r"to\s+be\s+implemented|coming\s+soon|stub)\b.*$",
+    re.IGNORECASE,
+)
+_MIN_CREATE_CONTENT_CHARS = 15
+
+
+def plan_actions_placeholder_creates(plan: dict[str, Any] | None) -> list[str]:
+    """Paths where a 'create' action's content is trivially a placeholder/stub,
+    not a real implementation.
+
+    ``action_has_writable_body`` only checks content is non-empty — a file whose
+    entire body is ``"// TODO: implement"`` or a handful of characters passes that
+    check and writes to disk as a "successful" create, with no code-side signal
+    that nothing was actually implemented. Flags: (a) content under
+    ``_MIN_CREATE_CONTENT_CHARS`` non-whitespace characters, or (b) every non-blank
+    line matches a placeholder-only pattern (TODO/TBD/FIXME/stub/etc.). Only checks
+    actions that supplied literal ``content`` — greenfield templateId scaffolds
+    (which write via a template function, not literal content) are unaffected.
+    """
+    if not plan:
+        return []
+    flagged: list[str] = []
+    for action in plan.get("create") or []:
+        path = action.get("path")
+        if not path:
+            continue
+        content = action.get("content")
+        if content is None:
+            continue  # scaffold/template path, or missing-content channel's job
+        text = str(content).strip()
+        if not text:
+            continue
+        if len(text) < _MIN_CREATE_CONTENT_CHARS:
+            flagged.append(str(path))
+            continue
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if lines and all(_PLACEHOLDER_ONLY_RE.match(ln) for ln in lines):
+            flagged.append(str(path))
+    return flagged
+
+
+def plan_paths_missing_from_diff(
+    plan: dict[str, Any] | None,
+    diff_summary: dict[str, Any] | None,
+) -> list[str]:
+    """Planned create/modify paths absent from diff-summary.json's actual
+    filesChanged — the deterministic ground truth of what apply_plan() really
+    wrote to disk.
+
+    POST_IMPLEMENT_REVIEW's ``planCoverage``/``passesReview`` fields are entirely
+    model self-reported — nothing in code cross-checks them against reality. This
+    is that cross-check: if the review claims full coverage (or simply doesn't
+    flag a gap) while a planned path was genuinely never written, this catches it
+    independent of what the review said.
+    """
+    if not plan or not diff_summary:
+        return []
+    planned = {
+        a.get("path")
+        for a in list(plan.get("create") or []) + list(plan.get("modify") or [])
+        if a.get("path")
+    }
+    written = set(diff_summary.get("filesChanged") or [])
+    return sorted(p for p in planned if p not in written)
+
+
+def plan_actions_outside_delta_scope(
+    plan: dict[str, Any] | None,
+    visual_delta: dict[str, Any] | None,
+) -> list[str]:
+    """During a visual-fidelity delta re-plan, every create/modify action must be
+    tagged with a subtaskId belonging to one of the failed sub-tasks — otherwise
+    "delta" silently becomes a full re-plan of the whole ticket, or drifts onto
+    sub-tasks that already passed visual validation.
+
+    Returns paths whose action is missing subtaskId or tags a subtaskId that
+    isn't in ``visual_delta["failedSubtasks"]`` — these must be rejected so the
+    re-plan stays scoped to what actually failed.
+    """
+    if not plan or not visual_delta:
+        return []
+    failed_ids = {
+        str(st.get("subtaskId"))
+        for st in (visual_delta.get("failedSubtasks") or [])
+        if st.get("subtaskId")
+    }
+    if not failed_ids:
+        return []
+    out_of_scope: list[str] = []
+    for action in list(plan.get("create") or []) + list(plan.get("modify") or []):
+        path = action.get("path")
+        if not path:
+            continue
+        subtask_id = action.get("subtaskId")
+        if subtask_id is None or str(subtask_id) not in failed_ids:
+            out_of_scope.append(str(path))
+    return out_of_scope
+
+
+def plan_actions_noop_modifies(
+    plan: dict[str, Any] | None,
+    source_snapshots: dict[str, Any] | None,
+) -> list[str]:
+    """Paths where a 'modify' action's content is byte-for-byte (whitespace-insensitive)
+    identical to the pre-edit source snapshot — i.e. content is present (passes
+    ``action_has_writable_body``) but nothing was actually changed.
+
+    ``action_has_writable_body`` only checks that content is non-empty — it cannot tell
+    a genuine edit from the model returning the original file unchanged. This is the
+    deterministic backstop: POST_IMPLEMENT_REVIEW's passesReview gate is model
+    self-graded (no code-side check backs it), so a no-op modify could otherwise sail
+    through both gates as a "successful" implementation that changed nothing.
+    Only compares when the snapshot has real content (exists, not binary/truncated/
+    error) — ambiguous snapshots are left to the existing missing-content channel.
+    """
+    if not plan or not source_snapshots:
+        return []
+    files = source_snapshots.get("files") or {}
+    noop: list[str] = []
+    for action in plan.get("modify") or []:
+        path = action.get("path")
+        if not path:
+            continue
+        content = action.get("content")
+        if content is None or str(content).strip() == "":
+            continue  # missing-content channel already covers this
+        root = action.get("root") or "default"
+        snap = files.get(f"{root}:{path}")
+        if not snap or not snap.get("exists") or snap.get("binary") or snap.get("truncated") or snap.get("error"):
+            continue
+        original = snap.get("content")
+        if original is None:
+            continue
+        if _normalize_for_diff(str(content)) == _normalize_for_diff(str(original)):
+            noop.append(str(path))
+    return noop
 
 
 def build_plan_review(

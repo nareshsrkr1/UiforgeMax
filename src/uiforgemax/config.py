@@ -82,6 +82,16 @@ class Config:
         )
 
         checks.append(CheckResult("UIFORGEMAX_RUNS_ROOT", True, self.runs_root))
+        from uiforgemax.pipeline.runs_prune import runs_retention_days
+
+        retention = runs_retention_days()
+        checks.append(
+            CheckResult(
+                "UIFORGEMAX_RUNS_RETENTION_DAYS",
+                True,
+                f"{retention} (default 14; set 0 to disable)" if retention > 0 else "0 (prune disabled)",
+            )
+        )
         checks.append(
             CheckResult(
                 "UIFORGEMAX_DEFAULT_POLICY",

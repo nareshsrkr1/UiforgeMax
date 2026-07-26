@@ -261,28 +261,37 @@ def build_mediation_request(
         return {
             **base,
             "instruction": (
-                "Read the actual image(s) from readImages NOW.  The visual-spec.json on disk is "
-                "a provisional shell with visualSpecUnconfirmed=true and empty components/layout/tokens "
-                "(sentinel value '__UNCONFIRMED_PENDING_MEDIATION__').  You MUST replace the entire "
-                "shell with real data extracted from the image. Do NOT pass through the shell values.\n\n"
-                "If imageRoles contains before/after pairs, diff them and describe exactly what "
-                "changed (added/removed/restyled components, layout shifts, color/token changes).\n\n"
-                "Extract from the image(s):\n"
-                "- layout.regions: named regions with type (navigation, header, main, sidebar, etc.)\n"
-                "- components[]: EVERY visible component — type, label/text, variant, colorHint, "
-                "confidence. Do NOT invent components not visible in the image.\n"
-                "- interactions[]: user actions inferred from the design (buttons, links, form submits)\n"
-                "- visualTokens.colors[]: all distinct colors visible (hex or name + context)\n"
-                "- visualTokens.typography[]: font sizes, weights, families if readable\n"
-                "- visualTokens.spacing[]: gap/margin patterns if discernible\n"
-                "- matchExactly: true if the image is a pixel-perfect reference the implementation "
-                "must match exactly (look for 'match exactly', 'pixel perfect', or similar cues)\n"
-                "- exactTextRequirements[]: button/label text that must appear verbatim\n"
-                "- confidence: overall 0–1 score for how clearly the image is readable\n\n"
-                "Set visualSpecUnconfirmed=false in your output to signal the spec is now confirmed. "
-                "Output only valid JSON matching the outputSchema — no repo edits."
+                "Fill the visual source-of-truth gap for THIS run — intake may be HTML, "
+                "wireframe, mockup, screenshot, design notes, or a mix. Do not assume images only.\n\n"
+                "WHEN readImages is non-empty:\n"
+                "Read those image(s) NOW. visual-spec.json may be a provisional shell "
+                "(visualSpecUnconfirmed=true, sentinel '__UNCONFIRMED_PENDING_MEDIATION__'). "
+                "Replace the entire shell with real layout/components/tokens from the image(s). "
+                "If imageRoles has before/after pairs, diff added/removed/restyled elements.\n\n"
+                "WHEN inputs/page.html or htmlDerived visual-spec exists (HTML intake):\n"
+                "Read inputs/page.html + the mechanical extract in visual-spec.json. Refine it: "
+                "complete component list, exact button/label text, shell/sidebar/nav regions, "
+                "main-content offset vs left nav, hero/list/row structure, and CSS token hints. "
+                "Do NOT invent UI absent from the HTML.\n\n"
+                "WHEN wireframe/mockup attachments exist without binary images:\n"
+                "Use attachments + design notes + visual-spec to produce the same schema.\n\n"
+                "Always extract:\n"
+                "- layout.regions: navigation, header, main, sidebar/shell, footer, etc.\n"
+                "- components[]: every visible control — type, label/text, variant, colorHint\n"
+                "- interactions[]: clicks, submits, navigation\n"
+                "- visualTokens: colors, typography, spacing when discernible\n"
+                "- exactTextRequirements[]: labels that must appear verbatim\n"
+                "- matchExactly: true for pixel-perfect / 'match exactly' cues\n"
+                "- confidence: 0–1 readability/clarity\n\n"
+                "Set visualSpecUnconfirmed=false. Output JSON only — no repo edits."
             ),
-            "readArtifacts": ["requirements.normalized.json", "visual-spec.json", "request-classification.json"],
+            "readArtifacts": [
+                "requirements.normalized.json",
+                "visual-spec.json",
+                "request-classification.json",
+                "inputs/page.html",
+                "inputs/attachments.json",
+            ],
             "readImages": images,
             "imageRoles": image_roles,
             "outputSchema": {
@@ -435,11 +444,19 @@ def build_mediation_request(
                 "gap in risks[] instead of guessing.\n"
                 "validationPlan: leave unit paths empty (TEST_GENERATION chooses pytest/"
                 "vitest/junit/…). Include topology, risks, blockers, coverage expectation. "
-                "Output full plan JSON."
+                "Output full plan JSON.\n"
+                "DELTA RE-PLAN: if plans/visual-delta.json exists, this is a targeted fix "
+                "after a failed visual-fidelity check — NOT a fresh full re-plan. Read its "
+                "failedSubtasks[] list. Every create/modify action you return MUST set "
+                "subtaskId to one of those failed sub-task IDs. Do NOT touch, re-plan, or "
+                "re-emit files for sub-tasks that already passed — their prior implementation "
+                "stays as-is. Address the specific issues/fixInstructions listed per sub-task, "
+                "not the original ticket from scratch."
             ),
             "readArtifacts": [
                 "plans/implementation-plan.json",
                 "plans/subtasks.json",
+                "plans/visual-delta.json",
                 "graph/source-snapshots.json",
                 "graph/requirement-map.json",
                 "graph/mediation-explain.json",
@@ -545,6 +562,13 @@ def build_mediation_request(
                 "Return tests[] bodies AND run[] (cwd/root correct for monorepos). "
                 "Every tests[].path you emit MUST appear in some run[] command.\n"
                 "Keep this stack-agnostic — pick the framework from the repo, not a fixed template.\n"
+                "HARD RULES:\n"
+                "• tests[] MUST be non-empty for UI/enhancement work unless skipTests=true with "
+                "a concrete skipReason (env-only gaps belong in TEST_ENV_RECOVERY, not empty tests).\n"
+                "• Prefer real assertions against implemented components and against intake SoT "
+                "(inputs/page.html / visual-spec exactTextRequirements / button labels) — "
+                "not empty stub files.\n"
+                "• Do not emit tiny smoke stubs that only render without asserting SoT labels.\n"
                 "MCP only writes + executes."
             ),
             "readArtifacts": [
@@ -554,6 +578,9 @@ def build_mediation_request(
                 "request-classification.json",
                 "run-flow.json",
                 "visual-spec.json",
+                "inputs/page.html",
+                "inputs/attachments.json",
+                "requirements.normalized.json",
             ],
             "readImages": images,
             "outputSchema": {
@@ -880,9 +907,10 @@ def build_mediation_request(
         return {
             **base,
             "instruction": (
-                "Review the implemented code against the approved plan using your IDE model. "
-                "This catches logic errors, missing implementations, and plan deviations that "
-                "visual validation cannot detect (API routes, state management, data flow).\n\n"
+                "Review the implemented code against the approved plan AND any intake "
+                "visual source-of-truth (HTML / wireframe / mockup / image). "
+                "This catches logic errors, missing implementations, plan deviations, and "
+                "obvious visual/shell mismatches.\n\n"
                 "CHECKS:\n"
                 "1. Every create/modify action in the plan must have a corresponding file in "
                 "diff-summary. Flag any plan actions that were not implemented.\n"
@@ -895,7 +923,11 @@ def build_mediation_request(
                 "5. Check cross-file consistency: imports match exports, API routes match "
                 "client calls, state management connects correctly.\n"
                 "6. For sub-tasked implementations, verify sub-task boundaries are clean "
-                "(no circular dependencies between sub-task outputs).\n\n"
+                "(no circular dependencies between sub-task outputs).\n"
+                "7. If inputs/page.html or visual-spec / attachments exist: flag critical "
+                "UI mismatches (wrong button labels/variants, content overlapping the left "
+                "nav/shell, missing hero/list regions from the SoT). Set passesReview=false "
+                "when critical visual or plan gaps remain.\n\n"
                 "Output JSON — no repo edits."
             ),
             "readArtifacts": [
@@ -905,6 +937,9 @@ def build_mediation_request(
                 "implementation/diff-summary.json",
                 "requirements.normalized.json",
                 "graph/requirement-map.json",
+                "visual-spec.json",
+                "inputs/page.html",
+                "inputs/attachments.json",
             ],
             "readImages": images,
             "outputSchema": {
@@ -953,15 +988,25 @@ def build_mediation_request(
         return {
             **base,
             "instruction": (
-                "Compare the implemented files against the original wireframe/mockup images. "
-                "For each sub-task, assess visual fidelity:\n\n"
-                "1. Read the original images from readImages.\n"
-                "2. Read the implementation file contents from the approved plan and "
-                "implementation diff-summary.\n"
-                "3. For each sub-task, score fidelity 0-1 and list specific deviations.\n"
-                "4. Flag sub-tasks that need delta re-implementation (fidelity < 0.7 or "
-                "critical deviations like wrong colors, missing components, layout breaks).\n"
-                "5. For flagged sub-tasks, provide specific fix instructions.\n\n"
+                "Compare the implemented UI against ALL intake visual sources of truth — "
+                "not images alone. Sources may include:\n"
+                "• HTML reference (inputs/page.html / attachments role=html)\n"
+                "• Wireframe / mockup images (readImages + attachments)\n"
+                "• Design notes markdown\n"
+                "• visual-spec.json (htmlDerived or mediated)\n\n"
+                "For each sub-task, assess fidelity:\n"
+                "1. Read SoT artifacts in readArtifacts and any readImages.\n"
+                "2. Read implemented files from approved plan + diff-summary "
+                "(pages, CSS, shell/sidebar/layout).\n"
+                "3. Score fidelity 0-1. Flag critical issues including:\n"
+                "   - wrong button labels / variants / placement vs SoT\n"
+                "   - main content overlapping or under the left nav / shell "
+                "(missing offset, wrong layout region)\n"
+                "   - missing hero / list / row fields from the HTML or wireframe\n"
+                "   - token/class mismatches that break the reference look\n"
+                "4. needsReimplementation=true when fidelity < 0.7 or any critical deviation.\n"
+                "5. Provide concrete fixInstructions + affectedFiles per failed sub-task.\n"
+                "6. passesVisualGate=false if any sub-task needs re-implementation.\n\n"
                 "Output JSON — no repo edits."
             ),
             "readArtifacts": [
@@ -971,11 +1016,13 @@ def build_mediation_request(
                 "plans/implementation-plan.json",
                 "implementation/diff-summary.json",
                 "inputs/attachments.json",
+                "inputs/page.html",
             ],
             "readImages": images,
             "imageRoles": image_roles,
             "outputSchema": {
                 "overallFidelity": "number 0-1",
+                "sotKindsChecked": ["html|image|wireframe|mockup|design_notes"],
                 "subtaskResults": [
                     {
                         "subtaskId": "ST-N",
@@ -995,7 +1042,7 @@ def build_mediation_request(
                     }
                 ],
                 "passesVisualGate": "boolean",
-                "globalIssues": ["string — cross-sub-task visual problems"],
+                "globalIssues": ["string — cross-sub-task visual problems e.g. shell overlap"],
             },
         }
 
@@ -1048,15 +1095,29 @@ def pending_mediations(stage: Stage, run_dir: Path, state: RunState) -> list[tup
                 pending.append((stage, primary))
         else:
             pending.append((stage, primary))
-    if stage == VISUAL_STAGE and _input_images(run_dir) and flags.get("runVisual", True):
-        pending.append((stage, VISUAL_KIND))
+    # VISUAL_INTERPRETATION: any intake visual SoT (HTML / image / wireframe / mockup).
+    # A real visual reference is concrete evidence — it must trigger interpretation
+    # regardless of classification's early runVisual guess (same rule as
+    # VISUAL_VALIDATE); otherwise an HTML-SoT ticket with runVisual=false gets only
+    # a mechanical htmlDerived visual-spec.json, never real model interpretation.
+    if stage == VISUAL_STAGE:
+        from uiforgemax.pipeline.visual_sot import detect_visual_references
+
+        ref = detect_visual_references(run_dir, state)
+        if ref.get("hasVisualRef") or _input_images(run_dir):
+            pending.append((stage, VISUAL_KIND))
 
     # REQUIREMENT_MAP: append coverage validation after GRAPH_EXPLAIN
     if stage == Stage.REQUIREMENT_MAP:
         pending.append((stage, MediationKind.REQ_MAP_VALIDATION))
 
-    if stage == Stage.VISUAL_VALIDATE and _input_images(run_dir):
-        pending.append((stage, MediationKind.VISUAL_VALIDATION))
+    # VISUAL_VALIDATION: fidelity gate for HTML / wireframe / mockup / images
+    if stage == Stage.VISUAL_VALIDATE:
+        from uiforgemax.pipeline.visual_sot import detect_visual_references
+
+        ref = detect_visual_references(run_dir, state)
+        if ref.get("hasVisualRef") or _input_images(run_dir):
+            pending.append((stage, MediationKind.VISUAL_VALIDATION))
 
     # IMPLEMENT: post-implementation code review
     if stage == Stage.IMPLEMENT:

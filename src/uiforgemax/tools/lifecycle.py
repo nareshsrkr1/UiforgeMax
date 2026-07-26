@@ -245,6 +245,24 @@ def start_run(
             f"No project_root passed to start_run — reused workspace from session: "
             f"{root_path.resolve()}. Prefer passing project_root explicitly."
         )
+
+    # Best-effort disk retention: async prune of old runs/_archive (never blocks).
+    try:
+        from uiforgemax.pipeline.runs_prune import runs_retention_days, schedule_prune_old_runs
+
+        retention = runs_retention_days()
+        if retention > 0:
+            scheduled = schedule_prune_old_runs(
+                ctx.config.runs_root,
+                keep_run_ids={run_id},
+                retention_days=retention,
+            )
+            extra["runsRetentionDays"] = retention
+            extra["runsPruneScheduled"] = scheduled
+            extra["runsPruneLog"] = str(Path(ctx.config.runs_root) / "_prune.log")
+    except Exception:  # noqa: BLE001 — prune must never fail start_run
+        pass
+
     return tool_response(
         state,
         msg,

@@ -35,10 +35,27 @@ def _freeze_approved_plan(run_dir: Path) -> None:
 
 
 def _clear_approved_plan(run_dir: Path) -> None:
+    from uiforgemax.pipeline.visual_validate import clear_visual_delta
+
     for name in ("approved-plan.json", "approved-plan.meta.json"):
         path = run_dir / "plans" / name
         if path.exists():
             path.unlink()
+    # A stale post-implement-review.json (from a prior implement cycle) must not
+    # survive a rewind to PLAN — _implement() treats an existing review with
+    # passesReview != false as "already passed" and returns early WITHOUT calling
+    # apply_plan() again, so delta fixes from a fresh PLAN_REFINEMENT would never
+    # actually get written to disk.
+    review_path = run_dir / "implementation" / "post-implement-review.json"
+    if review_path.exists():
+        archive = run_dir / "implementation" / "post-implement-review.superseded.json"
+        try:
+            review_path.replace(archive)
+        except OSError:
+            review_path.unlink(missing_ok=True)
+    # Same for visual-delta.json — request_changes / full replan must not inherit
+    # a prior visual-fidelity ST-* scope lock.
+    clear_visual_delta(run_dir, reason="approved-plan-cleared")
 
 
 def approve_api(ctx: ToolContext, run_id: str, by: str = "user") -> str:

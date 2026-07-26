@@ -71,12 +71,24 @@ def build_flow_plan(
     classification: dict[str, Any],
     signals: dict[str, Any],
     state: RunState,
+    *,
+    run_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Derive which stages run from classification + repo signals."""
+    """Derive which stages run from classification + repo signals + visual SoT."""
     surface = classification.get("surface", "unknown")
     request_type = classification.get("requestType", "enhancement")
     modes = list(signals.get("inputModes") or state.inputs.get("modes", []))
     has_images = bool(signals.get("imageCount")) or "image" in modes
+    # Any intake visual SoT: HTML, wireframe, mockup, or image — not image-only.
+    has_visual_ref = has_images or "html" in modes or bool(signals.get("hasHtml")) or bool(
+        signals.get("hasVisualRef")
+    )
+    if run_dir is not None:
+        from uiforgemax.pipeline.visual_sot import detect_visual_references
+
+        ref = detect_visual_references(run_dir, state)
+        has_images = has_images or bool(ref.get("hasImages"))
+        has_visual_ref = has_visual_ref or bool(ref.get("hasVisualRef"))
     root = signals.get("projectRoot", {})
     root_empty = bool(root.get("empty"))
     architecture = signals.get("architecture") or state.architecture or {}
@@ -92,7 +104,7 @@ def build_flow_plan(
 
     run_visual = classification.get("runVisual")
     if run_visual is None:
-        run_visual = surface != "api_only" or has_images
+        run_visual = surface != "api_only" or has_visual_ref
 
     run_api = classification.get("runApi")
     if run_api is None:
@@ -112,6 +124,7 @@ def build_flow_plan(
             active.append(stage.value)
             continue
         if stage in _VISUAL_STAGES:
+            # IMAGE_CONVERT still needs binary images; HTML uses normalize extract.
             if run_visual and has_images:
                 active.append(stage.value)
             else:
@@ -130,10 +143,17 @@ def build_flow_plan(
                 skipped[stage.value] = _skip_reason("api", surface)
             continue
         if stage in _VISUAL_VALIDATE_STAGES:
-            if run_visual and has_images:
+            # Fidelity gate for HTML, wireframe, mockup, OR images. A genuine
+            # visual reference is concrete evidence — it must not be silently
+            # skipped just because classification's early runVisual guess said
+            # false. Only skip when there is truly no visual SoT to check against.
+            if has_visual_ref:
                 active.append(stage.value)
             else:
-                skipped[stage.value] = _skip_reason("visual_validate", surface, has_images)
+                skipped[stage.value] = (
+                    f"visual_validate skipped (surface={surface!r}, "
+                    f"hasVisualRef={has_visual_ref}, hasImages={has_images})"
+                )
             continue
         active.append(stage.value)
 
@@ -149,6 +169,8 @@ def build_flow_plan(
             "runVisual": run_visual,
             "runApi": run_api,
             "greenfieldScaffold": greenfield_scaffold,
+            "hasVisualRef": has_visual_ref,
+            "hasImages": has_images,
         },
         "source": classification.get("source", "classification"),
     }
@@ -182,7 +204,7 @@ def resolve_flow(run_dir: Path, state: RunState) -> dict[str, Any]:
         if sig_path.exists()
         else {"inputModes": state.inputs.get("modes", [])}
     )
-    flow = build_flow_plan(classification, signals, state)
+    flow = build_flow_plan(classification, signals, state, run_dir=run_dir)
     save_flow(run_dir, flow)
     apply_flow_to_state(state, flow)
     return flow

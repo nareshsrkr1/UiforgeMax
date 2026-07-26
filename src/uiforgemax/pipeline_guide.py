@@ -18,7 +18,9 @@ PIPELINE_GUIDE = {
             "kinds": [
                 "REQUEST_CLASSIFICATION @ 0.6_classify",
                 "REQUIREMENT_ANALYSIS @ 2_normalize",
-                "VISUAL_INTERPRETATION @ 2_normalize (when image input)",
+                "VISUAL_INTERPRETATION @ 2_normalize (when HTML/image/wireframe/mockup SoT)",
+                "VISUAL_VALIDATION @ 9.5_visual_validate (any visual SoT)",
+                "POST_IMPLEMENT_REVIEW @ 9_implement (gates on passesReview)",
                 "GRAPH_EXPLAIN @ 4.6_requirement_map",
                 "PLAN_REFINEMENT @ 7_plan",
                 "TEST_GENERATION @ 10_test",

@@ -691,6 +691,66 @@ def write_env_gap(
     return gap
 
 
+def validate_test_generation(run_dir: Path, payload: dict[str, Any]) -> tuple[bool, str]:
+    """Reject empty or unjustified TEST_GENERATION payloads for UI work."""
+    tests = payload.get("tests") or []
+    skip = bool(payload.get("skipTests"))
+    if skip:
+        if not (payload.get("skipReason") or "").strip():
+            return False, "skipTests requires skipReason"
+        return True, ""
+    if not tests:
+        # Allow empty only for pure api_only surfaces with no UI files changed.
+        surface = "unknown"
+        cls_path = run_dir / "request-classification.json"
+        if cls_path.exists():
+            try:
+                surface = str(json.loads(cls_path.read_text(encoding="utf-8")).get("surface") or "unknown")
+            except (OSError, json.JSONDecodeError):
+                pass
+        if surface in ("api_only", "infra"):
+            return True, ""
+        return (
+            False,
+            "tests[] is empty — emit real unit/DOM tests (or skipTests with skipReason). "
+            "Read inputs/page.html / visual-spec.json and assert SoT labels where relevant.",
+        )
+    # Reject stub-only bodies (tiny files with no assert/expect)
+    stubby = 0
+    for t in tests:
+        content = str(t.get("content") or "")
+        path = str(t.get("path") or "")
+        if not path or not content.strip():
+            return False, f"each tests[] entry needs path + content (bad: {path or '(no path)'})"
+        lower = content.lower()
+        has_assert = any(
+            token in lower
+            for token in (
+                "expect(", "assert", "tobe(", "toequal(", "@test",
+                # Go: t.Errorf/t.Fatal/t.Fatalf/t.Run rarely contain "assert" at all —
+                # idiomatic Go tests use plain if-checks + t.Errorf, not an assert lib.
+                "t.error", "t.fatal", "t.run(",
+                # Go/Ruby/etc. testify-/rspec-style require./should.
+                "require.", "should.", "should_",
+                # Generic BDD declaration wrappers (weak signal, backed by the
+                # existing length check so a truly empty it()/test() still fails).
+                "it(", "test(", "describe(",
+            )
+        )
+        if len(content.strip()) < 80 or not has_assert:
+            stubby += 1
+    if stubby == len(tests):
+        return (
+            False,
+            "tests[] look like empty stubs — include real assertions "
+            "(expect/assert) against implemented UI or SoT labels.",
+        )
+    run = payload.get("run") or []
+    if tests and not run:
+        return False, "tests[] present but run[] missing — specify how to execute them"
+    return True, ""
+
+
 def validate_test_env_recovery(run_dir: Path, payload: dict[str, Any]) -> tuple[bool, str]:
     """Reject recovery that ignores toolchain facts (e.g. skipped install when needed)."""
     facts = load_toolchain_facts(run_dir)

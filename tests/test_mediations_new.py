@@ -280,6 +280,8 @@ def test_build_post_implement_review_request(tmp_path):
     assert req["kind"] == "POST_IMPLEMENT_REVIEW"
     assert "plans/approved-plan.json" in req["readArtifacts"]
     assert "implementation/diff-summary.json" in req["readArtifacts"]
+    assert "inputs/page.html" in req["readArtifacts"]
+    assert "visual-spec.json" in req["readArtifacts"]
     assert "overallQuality" in req["outputSchema"]
 
 

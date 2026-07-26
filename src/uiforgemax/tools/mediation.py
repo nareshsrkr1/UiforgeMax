@@ -83,6 +83,19 @@ def submit_mediation(
 
     kind_str = mediation_key.split("::")[-1]
     kind = MediationKind(kind_str)
+    if kind == MediationKind.TEST_GENERATION:
+        from uiforgemax.pipeline.testing import validate_test_generation
+
+        ok, reason = validate_test_generation(run_dir, data)
+        if not ok:
+            return tool_response(
+                state,
+                f"BLOCKED: TEST_GENERATION rejected — {reason}. "
+                "Re-read approved plan + inputs/page.html / visual-spec.json and resubmit "
+                "with real tests[] + run[] (or justified skipTests).",
+                stop=True,
+                extra={"runsDir": str(run_dir), "modelMediation": state.mediation.get("pending")},
+            )
     if kind == MediationKind.TEST_ENV_RECOVERY:
         from uiforgemax.pipeline.testing import validate_test_env_recovery
 
@@ -96,7 +109,12 @@ def submit_mediation(
                 extra={"runsDir": str(run_dir), "modelMediation": state.mediation.get("pending")},
             )
     if kind == MediationKind.PLAN_REFINEMENT:
-        from uiforgemax.pipeline.planning import plan_actions_missing_content
+        from uiforgemax.pipeline.planning import (
+            plan_actions_missing_content,
+            plan_actions_noop_modifies,
+            plan_actions_outside_delta_scope,
+            plan_actions_placeholder_creates,
+        )
 
         # Merge-shaped payload: validate the create/modify it would write.
         probe = {
@@ -118,6 +136,67 @@ def submit_mediation(
                     stop=True,
                     extra={"runsDir": str(run_dir), "modelMediation": state.mediation.get("pending")},
                 )
+
+            snapshots_path = run_dir / "graph" / "source-snapshots.json"
+            snapshots = None
+            if snapshots_path.exists():
+                try:
+                    snapshots = json.loads(snapshots_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    snapshots = None
+            noop = plan_actions_noop_modifies(probe, snapshots)
+            if noop:
+                return tool_response(
+                    state,
+                    "BLOCKED: PLAN_REFINEMENT rejected — these 'modify' actions return content "
+                    "IDENTICAL to the original file (no actual change): "
+                    f"{', '.join(noop[:12])}{'…' if len(noop) > 12 else ''}. "
+                    "A modify action must apply the requirement's real change. Re-read "
+                    "graph/source-snapshots.json, make the actual edit, and resubmit with the "
+                    "genuinely modified full file body — or move the path to 'create' only if "
+                    "it doesn't really need editing.",
+                    stop=True,
+                    extra={"runsDir": str(run_dir), "modelMediation": state.mediation.get("pending")},
+                )
+
+            placeholders = plan_actions_placeholder_creates(probe)
+            if placeholders:
+                return tool_response(
+                    state,
+                    "BLOCKED: PLAN_REFINEMENT rejected — these 'create' actions are trivial "
+                    "placeholders (TODO/stub/near-empty), not a real implementation: "
+                    f"{', '.join(placeholders[:12])}{'…' if len(placeholders) > 12 else ''}. "
+                    "Write the actual full file body implementing the requirement.",
+                    stop=True,
+                    extra={"runsDir": str(run_dir), "modelMediation": state.mediation.get("pending")},
+                )
+
+            delta_path = run_dir / "plans" / "visual-delta.json"
+            if delta_path.exists():
+                try:
+                    visual_delta = json.loads(delta_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    visual_delta = None
+                out_of_scope = plan_actions_outside_delta_scope(probe, visual_delta)
+                if out_of_scope:
+                    failed_ids = sorted(
+                        {
+                            str(st.get("subtaskId"))
+                            for st in ((visual_delta or {}).get("failedSubtasks") or [])
+                            if st.get("subtaskId")
+                        }
+                    )
+                    return tool_response(
+                        state,
+                        "BLOCKED: PLAN_REFINEMENT rejected — this is a visual-fidelity DELTA "
+                        f"re-plan scoped to sub-tasks {failed_ids}, but these actions are "
+                        "missing subtaskId or tag a sub-task that already passed: "
+                        f"{', '.join(out_of_scope[:12])}{'…' if len(out_of_scope) > 12 else ''}. "
+                        "Set subtaskId on every create/modify action to one of the failed IDs "
+                        "above, and do not re-touch sub-tasks that already passed.",
+                        stop=True,
+                        extra={"runsDir": str(run_dir), "modelMediation": state.mediation.get("pending")},
+                    )
     save_mediation_response(run_dir, mediation_key, data)
     apply_mediation(run_dir, kind, data)
 
@@ -170,7 +249,10 @@ def _status_after_stage(stage: Stage) -> Status:
         Stage.NORMALIZE: Status.NORMALIZED,
         Stage.REQUIREMENT_MAP: Status.REQUIREMENT_MAPPED,
         Stage.PLAN: Status.PLAN_READY,
+        # Re-enter implement so post-review gate / skip-rewrite can run.
+        Stage.IMPLEMENT: Status.IMPLEMENTING,
         # Stay on testing so advance re-runs _test after GENERATION / ENV_RECOVERY.
         Stage.TEST: Status.TESTING,
+        Stage.VISUAL_VALIDATE: Status.VISUAL_VALIDATED,
     }
     return mapping.get(stage, Status.NORMALIZED)

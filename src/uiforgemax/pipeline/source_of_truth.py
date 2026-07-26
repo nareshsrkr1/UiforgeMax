@@ -122,6 +122,15 @@ def collect_source_of_truth(run_dir: Path) -> dict[str, Any]:
         except (json.JSONDecodeError, OSError):
             pass
 
+    # Rebuild designNotes from attachment roles when the manifest omitted the
+    # top-level list (partial/hand-written attachments.json still has role=).
+    if not catalog.get("designNotes"):
+        catalog["designNotes"] = [
+            str(a.get("path"))
+            for a in (catalog.get("attachments") or [])
+            if a.get("role") == "design_notes" and a.get("path")
+        ]
+
     page = run_dir / "inputs" / "page.html"
     if page.exists():
         catalog["primaryHtml"] = "inputs/page.html"

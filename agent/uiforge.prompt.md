@@ -1,3 +1,8 @@
+---
+description: 'Drive the UiForgeMax MCP pipeline for a Jira ticket or feature request'
+mode: 'agent'
+---
+
 # UiForgeMax Agent — tool allowlist only
 
 **MCP-only agent.** Use **only** the tools below. If `uiforgemax_*` MCP tools are unavailable (call fails, server not listed, not connected): **STOP immediately** — do not use Shell, Edit, or other tools as a workaround. Tell the user to enable the `uiforgemax` MCP server in their IDE's MCP settings and reload the window.
@@ -43,7 +48,6 @@ uiforgemax_approve_api
 uiforgemax_approve_plan
 uiforgemax_request_changes
 uiforgemax_approve_understanding
-
 uiforgemax_answer_clarifications
 ```
 
@@ -86,28 +90,11 @@ uiforgemax_answer_clarifications
 **Graphify** is the real CLI (`pip install graphifyy` → `python -m graphify update/query`).
 Preflight must find it on the session python. Artifacts land in each repo's `graphify-out/`.
 
-## IDE setup
-
-UiForgeMax is IDE-agnostic — it works in any MCP-capable agent IDE. Two things
-must be wired up, wherever your IDE keeps them:
-
-1. **Agent rules** — load this document as the driving agent's instructions, via
-   whatever mechanism your IDE uses for persistent agent/system rules (a rules
-   file, custom instructions, or an agent-config entry that points at this file).
-2. **MCP server** — register `uiforgemax` in your IDE's MCP config with the venv
-   python as `command`, `["-m", "uiforgemax.server"]` as args, and the Jira env
-   vars. The MCP config JSON shape is the same across IDEs; only its location
-   differs (consult your IDE's MCP docs for where that file lives).
-
-Use the IDE in its **agent mode** with any capable model — no special
-subagent/reviewer is required. The tool allowlist and flow below are identical
-regardless of IDE; every IDE calls the same MCP tools.
-
 ## project_root examples
 
 | Scenario | `project_root` |
 |----------|----------------|
-| Enhance Nx demo | `…/UiforgeMax/platform` |
+| Enhance existing app | `…/Project` |
 | Sample FastAPI + React | `…/Project` |
 | Greenfield | empty folder path |
 
@@ -158,7 +145,7 @@ tests only. Real apps may be any stack or domain. PLAN_REFINEMENT must supply fu
      revisions to specific sub-tasks only (e.g. re-plan just ST-2 and ST-3).
 ```
 
-## Pipeline stages (22-stage deterministic pipeline)
+## Pipeline stages (deterministic pipeline)
 
 ```
 INTAKE → ARCH_DETECT → CLASSIFY → IMAGE_CONVERT
@@ -183,20 +170,20 @@ INTAKE → ARCH_DETECT → CLASSIFY → IMAGE_CONVERT
 | REQUEST_CLASSIFICATION | CLASSIFY | Always |
 | INTAKE_RECONCILIATION | NORMALIZE | When Jira has comments/edits (conflict resolution) |
 | REQUIREMENT_ANALYSIS | NORMALIZE | Always (produces mandatory graphSearchStrategy) |
-| VISUAL_INTERPRETATION | NORMALIZE | When any visual SoT exists (HTML / image / wireframe / mockup) |
+| VISUAL_INTERPRETATION | NORMALIZE | When images exist |
 | TASK_DECOMPOSITION | DECOMPOSE | >2 ACs (skipped for simple). Produces searchContext per sub-task |
 | QUERY_STRATEGY | GRAPH_QUERY_PLAN | Always (IDE sees graph structure + requirements, decides what to search) |
 | GRAPH_EXPLAIN | REQUIREMENT_MAP | When useGraph=true |
 | REQ_MAP_VALIDATION | REQUIREMENT_MAP | Always (coverage check after graph explain) |
 | PLAN_REFINEMENT | PLAN | Always |
-| POST_IMPLEMENT_REVIEW | IMPLEMENT | Always (code + SoT review; `passesReview=false` rewinds to PLAN) |
-| VISUAL_VALIDATION | VISUAL_VALIDATE | When any visual SoT exists (HTML / image / wireframe / mockup) |
-| TEST_GENERATION | TEST | Always (rejects empty/stub tests for UI work) |
+| POST_IMPLEMENT_REVIEW | IMPLEMENT | Always (code review against plan) |
+| VISUAL_VALIDATION | VISUAL_VALIDATE | When images exist |
+| TEST_GENERATION | TEST | Always |
 | TEST_ENV_RECOVERY | TEST | On env gap |
 
 ## Dynamic flow
 
-After classify, `run-flow.json` skips irrelevant stages (ui_only → no API; greenfield → no graph). Classification JSON may set `useGraph`, `runApi`, `runVisual`, `greenfieldScaffold`. DECOMPOSE always runs (simple requests auto-wrap). VISUAL_VALIDATE runs when `runVisual=true` and any visual SoT exists (HTML, wireframe, mockup, or images) — not image-only. GATE_API is always auto-approved (sole human gate is GATE_PLAN). INTAKE_RECONCILIATION fires at NORMALIZE only when Jira has comments/changelog. REQ_MAP_VALIDATION fires after GRAPH_EXPLAIN. POST_IMPLEMENT_REVIEW fires after every implementation and gates on `passesReview`.
+After classify, `run-flow.json` skips irrelevant stages (ui_only → no API; greenfield → no graph). Classification JSON may set `useGraph`, `runApi`, `runVisual`, `greenfieldScaffold`. DECOMPOSE always runs (simple requests auto-wrap). VISUAL_VALIDATE only runs when `runVisual=true` and images exist. GATE_API is always auto-approved (sole human gate is GATE_PLAN). INTAKE_RECONCILIATION fires at NORMALIZE only when Jira has comments/changelog. REQ_MAP_VALIDATION fires after GRAPH_EXPLAIN. POST_IMPLEMENT_REVIEW fires after every implementation.
 
 ## Multiple components in one run
 
@@ -204,13 +191,12 @@ If the human names more than one component up front (e.g. a `ui` repo and a `bac
 whether they're subfolders of one parent or genuinely separate folders), pass all of them as
 `components='{"ui": "path", "backend": "path"}'` to `preflight`/`start_run` in step 2-4 above.
 
-Graphify then runs the **real** CLI (not an Nx demo indexer):
+Graphify then runs the **real** CLI (not a demo indexer):
 1. **Per-repo** (`3_graphify_update`) — `python -m graphify update <root>` →
    `<repo>/graphify-out/graph.json` (mirrored under the run dir as
-   `graph/by-root/<name>/graph.json`). Stack (Nx/etc.) is detected cheaply from files first;
-   Nx is only a flavor flag, never a hard gate.
+   `graph/by-root/<name>/graph.json`). Stack is detected cheaply from files first.
 2. **Merged** (`3.5_graph_merge`) — multi-root runs use `graphify merge-graphs`.
-3. **Query** — requirement-shaped `graphify query "…"` questions (not DataGrid templates).
+3. **Query** — requirement-shaped `graphify query "…"` questions.
 4. **Explain / map** — from those answers; never invent demo pages/APIs for `ui_only`.
 
 Only if a plan action later references a component name that was genuinely never mentioned

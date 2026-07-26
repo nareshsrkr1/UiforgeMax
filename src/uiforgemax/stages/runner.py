@@ -243,7 +243,7 @@ def _classify(ctx: ToolContext, state: RunState) -> StageResult:
     state.artifacts["surface"] = classification.get("surface")
 
     signals = classification.get("signals") or build_classification_signals(state, run_dir)
-    flow = build_flow_plan(classification, signals, state)
+    flow = build_flow_plan(classification, signals, state, run_dir=run_dir)
     save_flow(run_dir, flow)
     apply_flow_to_state(state, flow)
 
@@ -675,6 +675,9 @@ def _gate_plan(ctx: ToolContext, state: RunState) -> StageResult:
         EMPTY_PLAN_BLOCKER,
         MISSING_CONTENT_BLOCKER,
         plan_actions_missing_content,
+        plan_actions_noop_modifies,
+        plan_actions_outside_delta_scope,
+        plan_actions_placeholder_creates,
         plan_has_file_actions,
         plan_is_implementable,
     )
@@ -706,6 +709,63 @@ def _gate_plan(ctx: ToolContext, state: RunState) -> StageResult:
                 "PLAN_REFINEMENT must return full file bodies before human approval."
             ),
         )
+
+    # Deterministic backstops that submit_mediation already enforces on the
+    # mediated path — repeated here so they also apply when mediation is
+    # bypassed (UIFORGEMAX_SKIP_MEDIATION=1 dev/CI mode uses a deterministic
+    # plan that never goes through submit_mediation's PLAN_REFINEMENT checks).
+    snapshots_path = run_dir / "graph" / "source-snapshots.json"
+    snapshots = _load_json(snapshots_path) if snapshots_path.exists() else None
+    noop = plan_actions_noop_modifies(plan, snapshots)
+    if noop:
+        state.status = Status.BLOCKED
+        state.record(Stage.GATE_PLAN, "blocked", "noop_modifies")
+        return StageResult(
+            stop=True,
+            message=(
+                "BLOCKED: these 'modify' actions return content IDENTICAL to the "
+                f"original file (no actual change): {', '.join(noop[:12])}"
+                f"{'…' if len(noop) > 12 else ''}. Re-run PLAN_REFINEMENT with a "
+                "genuine edit for each path."
+            ),
+        )
+    placeholders = plan_actions_placeholder_creates(plan)
+    if placeholders:
+        state.status = Status.BLOCKED
+        state.record(Stage.GATE_PLAN, "blocked", "placeholder_creates")
+        return StageResult(
+            stop=True,
+            message=(
+                "BLOCKED: these 'create' actions are trivial placeholders "
+                f"(TODO/stub/near-empty), not a real implementation: "
+                f"{', '.join(placeholders[:12])}{'…' if len(placeholders) > 12 else ''}. "
+                "Re-run PLAN_REFINEMENT with the actual full file body."
+            ),
+        )
+    delta_path = run_dir / "plans" / "visual-delta.json"
+    if delta_path.exists():
+        visual_delta = _load_json(delta_path)
+        out_of_scope = plan_actions_outside_delta_scope(plan, visual_delta)
+        if out_of_scope:
+            failed_ids = sorted(
+                {
+                    str(st.get("subtaskId"))
+                    for st in (visual_delta.get("failedSubtasks") or [])
+                    if st.get("subtaskId")
+                }
+            )
+            state.status = Status.BLOCKED
+            state.record(Stage.GATE_PLAN, "blocked", "delta_out_of_scope")
+            return StageResult(
+                stop=True,
+                message=(
+                    f"BLOCKED: this is a visual-fidelity DELTA re-plan scoped to "
+                    f"sub-tasks {failed_ids}, but these actions are missing subtaskId "
+                    f"or tag a sub-task that already passed: {', '.join(out_of_scope[:12])}"
+                    f"{'…' if len(out_of_scope) > 12 else ''}. Set subtaskId on every "
+                    "create/modify action to one of the failed IDs above."
+                ),
+            )
 
     if not state.approvals.plan.approved and skip_plan_approval():
         from uiforgemax.tools.approvals import _freeze_approved_plan, _now
@@ -752,6 +812,130 @@ def _implement(ctx: ToolContext, state: RunState) -> StageResult:
 
     roots = _project_roots(ctx, state)
     run_dir = _run_dir(ctx, state)
+
+    # After POST_IMPLEMENT_REVIEW: gate on passesReview, then continue without rewrite.
+    review_path = run_dir / "implementation" / "post-implement-review.json"
+    if review_path.exists():
+        try:
+            review = _load_json(review_path)
+        except Exception:  # noqa: BLE001
+            review = {}
+
+        # An omitted passesReview is NOT the same as passesReview=true — the old
+        # check (`review.get("passesReview") is False`) let a missing/None field
+        # fall through to "already passed, continue" by default. A malformed or
+        # incomplete review must never silently count as a pass.
+        if "passesReview" not in review or review.get("passesReview") is None:
+            review["issues"] = [
+                {
+                    "severity": "critical",
+                    "file": "(review)",
+                    "issue": (
+                        "POST_IMPLEMENT_REVIEW response omitted 'passesReview' — "
+                        "treating as failed pending an explicit true/false verdict."
+                    ),
+                }
+            ] + (review.get("issues") or [])
+            review["passesReview"] = False
+
+        # A rubber-stamped passesReview=true must not override the model's own
+        # critical findings — if it listed a critical issue, that IS a failure,
+        # regardless of what the boolean says.
+        has_critical_issue = any(
+            str(i.get("severity", "")).lower() == "critical" for i in (review.get("issues") or [])
+        )
+        if review.get("passesReview") is True and has_critical_issue:
+            review["passesReview"] = False
+
+        # Deterministic cross-check: planCoverage/passesReview are entirely model
+        # self-reported. Verify against diff-summary.json (MCP's own record of what
+        # apply_plan() actually wrote) independent of what the review claims — a
+        # review that says "fully covered" while a planned path was genuinely never
+        # written must not be trusted just because the model said so.
+        from uiforgemax.pipeline.planning import plan_paths_missing_from_diff
+
+        approved_path = run_dir / "plans" / "approved-plan.json"
+        approved_plan = _load_json(approved_path) if approved_path.exists() else {}
+        diff_path = run_dir / "implementation" / "diff-summary.json"
+        diff_summary = _load_json(diff_path) if diff_path.exists() else {}
+        real_missing = plan_paths_missing_from_diff(approved_plan, diff_summary)
+        if real_missing:
+            review["passesReview"] = False
+            review["realMissingPaths"] = real_missing
+            review.setdefault("planCoverage", {})["missing"] = sorted(
+                set(review.get("planCoverage", {}).get("missing") or []) | set(real_missing)
+            )
+            # Inject synthetic critical issues so the rewind message surfaces the
+            # deterministically-found gap even if the model's own issues[] didn't
+            # mention it (e.g. it wrongly claimed passesReview=true with no issues).
+            existing_issue_files = {i.get("file") for i in (review.get("issues") or [])}
+            synthetic = [
+                {
+                    "severity": "critical",
+                    "file": path,
+                    "issue": "Planned file was never written (verified against diff-summary.json)",
+                }
+                for path in real_missing
+                if path not in existing_issue_files
+            ]
+            review["issues"] = (review.get("issues") or []) + synthetic
+
+        if review.get("passesReview") is False:
+            from uiforgemax.model_mediation.service import clear_mediation_responses
+
+            issues = review.get("issues") or []
+            critical = [
+                i for i in issues if str(i.get("severity", "")).lower() == "critical"
+            ] or issues[:5]
+            feedback = {
+                "type": "post_implement_review",
+                "passesReview": False,
+                "issues": critical,
+                "planCoverage": review.get("planCoverage"),
+                "message": (
+                    "POST_IMPLEMENT_REVIEW failed — fix critical gaps vs plan/SoT, "
+                    "then re-approve plan for delta implement."
+                ),
+            }
+            from uiforgemax.pipeline.visual_validate import clear_visual_delta
+
+            state.approvals.plan.feedback = json.dumps(feedback)
+            state.approvals.plan.approved = False
+            # Archive failed review so the next implement cycle can re-run review.
+            archive = run_dir / "implementation" / "post-implement-review.failed.json"
+            try:
+                review_path.replace(archive)
+            except OSError:
+                review_path.unlink(missing_ok=True)
+            approved = run_dir / "plans" / "approved-plan.json"
+            if approved.exists():
+                approved.unlink(missing_ok=True)
+            # Drop any prior visual-delta lock — this rewind is post-implement, not
+            # a visual-fidelity delta; stale ST-* scope must not constrain re-plan.
+            clear_visual_delta(run_dir, reason="post-implement-rewind")
+            clear_mediation_responses(run_dir)
+            state.status = Status.PLAN_READY
+            state.current_stage = Stage.PLAN
+            state.record(Stage.IMPLEMENT, "failed", "post_implement_review failed")
+            return StageResult(
+                stop=True,
+                message=(
+                    "POST_IMPLEMENT_REVIEW failed (passesReview=false). "
+                    "Rewound to PLAN — re-run PLAN_REFINEMENT with fixes for: "
+                    + ", ".join(
+                        str(i.get("issue") or i.get("file") or "?") for i in critical[:6]
+                    )
+                ),
+                extra={"postImplementReview": review},
+            )
+        # Review already passed — do not re-apply the plan; continue pipeline.
+        state.status = Status.IMPLEMENTING
+        state.record(Stage.IMPLEMENT, "ok", "post_implement_review passed")
+        return StageResult(
+            stop=False,
+            message="Post-implement review passed — continuing.",
+        )
+
     # Prefer the frozen snapshot from approve_plan so mediation cannot drift the plan.
     approved_path = run_dir / "plans" / "approved-plan.json"
     plan_path = approved_path if approved_path.exists() else run_dir / "plans" / "implementation-plan.json"
@@ -1031,7 +1215,9 @@ def _test(ctx: ToolContext, state: RunState) -> StageResult:
 
 
 def _visual_validate(ctx: ToolContext, state: RunState) -> StageResult:
+    from uiforgemax.env_flags import skip_mediation as is_mediation_skipped
     from uiforgemax.pipeline.visual_validate import (
+        clear_visual_delta,
         prepare_delta_reimplementation,
         should_run_visual_validation,
     )
@@ -1048,19 +1234,49 @@ def _visual_validate(ctx: ToolContext, state: RunState) -> StageResult:
 
     validation_path = run_dir / "implementation" / "visual-validation.json"
     if not validation_path.exists():
-        state.record(Stage.VISUAL_VALIDATE, "skipped", "no validation result")
-        return StageResult(stop=False, message="Visual validation skipped (no result file).")
+        if is_mediation_skipped():
+            state.record(Stage.VISUAL_VALIDATE, "skipped", "no validation result (mediation disabled)")
+            return StageResult(
+                stop=False, message="Visual validation skipped (mediation disabled)."
+            )
+        # A real visual SoT exists and mediation is NOT disabled, yet no result
+        # landed — _maybe_pause_mediation should have caught this. Treat the
+        # desync as a hard block instead of silently shipping unverified code.
+        state.status = Status.BLOCKED
+        state.record(Stage.VISUAL_VALIDATE, "blocked", "visual SoT pending, no validation result")
+        return StageResult(
+            stop=True,
+            message=(
+                "BLOCKED: a visual source-of-truth exists but VISUAL_VALIDATION never "
+                "completed. Call uiforgemax_advance to retry the mediation."
+            ),
+        )
 
     validation = _load_json(validation_path)
 
+    # Attempt count is owned by MCP code, not the model — it lives in
+    # plans/visual-delta.json (written by the prior prepare_delta_reimplementation
+    # call), never in the mediation's own response. The model was never asked
+    # for (and never reliably supplies) an "_attempt" field, so reading it from
+    # validation.json always defaulted to 1 and the "max 2 attempts" cap never
+    # tripped — this could loop between PLAN and VISUAL_VALIDATE indefinitely.
+    delta_path = run_dir / "plans" / "visual-delta.json"
+    attempt = 1
+    if delta_path.exists():
+        try:
+            attempt = int(_load_json(delta_path).get("attempt", 1))
+        except (ValueError, TypeError):
+            attempt = 1
+
     if validation.get("passesVisualGate"):
+        clear_visual_delta(run_dir, reason="passed")
         state.status = Status.VISUAL_VALIDATED
         fidelity = validation.get("overallFidelity", "?")
         state.record(Stage.VISUAL_VALIDATE, "ok", f"fidelity={fidelity}")
         return StageResult(stop=False, message=f"Visual validation passed (fidelity={fidelity}).")
 
-    attempt = validation.get("_attempt", 1)
     if attempt >= 2:
+        clear_visual_delta(run_dir, reason="max-attempts")
         state.status = Status.VISUAL_VALIDATED
         state.record(Stage.VISUAL_VALIDATE, "warn", "max attempts reached, proceeding")
         return StageResult(
@@ -1072,6 +1288,27 @@ def _visual_validate(ctx: ToolContext, state: RunState) -> StageResult:
     failed_ids = [r["subtaskId"] for r in failed]
 
     prepare_delta_reimplementation(run_dir, state, failed, attempt=attempt)
+
+    from uiforgemax.model_mediation.service import clear_mediation_responses
+
+    state.approvals.plan.approved = False
+    approved = run_dir / "plans" / "approved-plan.json"
+    if approved.exists():
+        approved.unlink(missing_ok=True)
+    clear_mediation_responses(run_dir)
+    # Drop prior validation so the next cycle re-pauses for VISUAL_VALIDATION.
+    validation_path.unlink(missing_ok=True)
+    # Drop the prior POST_IMPLEMENT_REVIEW too — otherwise _implement() finds this
+    # stale (already-passed) review on the next cycle and short-circuits without
+    # ever calling apply_plan() again, so the delta re-implementation fixes from
+    # PLAN_REFINEMENT are silently never written to disk.
+    review_path = run_dir / "implementation" / "post-implement-review.json"
+    if review_path.exists():
+        archive = run_dir / "implementation" / "post-implement-review.superseded-by-visual.json"
+        try:
+            review_path.replace(archive)
+        except OSError:
+            review_path.unlink(missing_ok=True)
 
     state.status = Status.PLAN_READY
     state.current_stage = Stage.PLAN

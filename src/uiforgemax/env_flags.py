@@ -18,6 +18,16 @@ def skip_plan_approval() -> bool:
     return _truthy("UIFORGEMAX_SKIP_PLAN_APPROVAL")
 
 
+def runs_retention_days() -> int:
+    """Days to keep run dirs under ``UIFORGEMAX_RUNS_ROOT`` (default 14; ``0`` disables).
+
+    See :func:`uiforgemax.pipeline.runs_prune.runs_retention_days`.
+    """
+    from uiforgemax.pipeline.runs_prune import runs_retention_days as _days
+
+    return _days()
+
+
 def install_timeout_seconds(default: int = 900) -> int:
     """Max seconds for dependency installs (npm/pip/…). Default 900 (15 minutes).
 

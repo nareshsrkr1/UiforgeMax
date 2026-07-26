@@ -33,7 +33,10 @@ All run data is stored under **system app data**, not in the project repo:
 Graph index cache: `%APPDATA%\UiForgeMax\graph\<hash>\`
 Session (python path + workspace, saved by preflight): `%APPDATA%\UiForgeMax\session.json`
 
-Override runs root with env `UIFORGEMAX_RUNS_ROOT`.
+Override runs root with env `UIFORGEMAX_RUNS_ROOT`.  
+`UIFORGEMAX_RUNS_RETENTION_DAYS` defaults to **14** — on each `start_run`, async
+best-effort prune of run dirs (and `_archive/`) older than N days; logs to
+`runs/_prune.log` (never blocks or fails the pipeline). Set `0` to disable.
 
 ## Configure Cursor
 

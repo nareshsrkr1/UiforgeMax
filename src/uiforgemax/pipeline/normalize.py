@@ -47,6 +47,8 @@ def build_visual_spec(
     prompt: str | None = None,
     sot: dict[str, Any] | None = None,
     has_image: bool = False,
+    *,
+    run_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Build a visual spec from actual intake inputs — never invent demo UI.
 
@@ -93,7 +95,7 @@ def build_visual_spec(
     # HTML-only: do a lightweight mechanical extract (no LLM) — headings, links,
     # form fields, button labels — as a structural skeleton for mediation.
     if primary_html:
-        html_summary = _extract_html_structure(primary_html)
+        html_summary = _extract_html_structure(primary_html, run_dir=run_dir)
         return {
             "source": primary_html,
             "confidence": 0.6,
@@ -101,7 +103,8 @@ def build_visual_spec(
             "htmlDerived": True,
             "note": (
                 "Derived mechanically from inputs/page.html. VISUAL_INTERPRETATION mediation "
-                "should refine component list, tokens, and interactions."
+                "refines component list, shell/sidebar geometry, tokens, and interactions "
+                "against the HTML source of truth."
             ),
             **html_summary,
             "referenceHtml": primary_html,
@@ -133,22 +136,34 @@ def build_visual_spec(
     }
 
 
-def _extract_html_structure(html_path: str) -> dict[str, Any]:
+def _extract_html_structure(
+    html_path: str,
+    *,
+    run_dir: Path | None = None,
+) -> dict[str, Any]:
     """Mechanical DOM summary from a stored HTML file — no LLM.
 
     Extracts headings, button labels, form field labels, link text, and
     top-level landmark regions as structural hints for mediation.  Never
     invents data that is not present in the file.
+
+    ``html_path`` may be run-relative (``inputs/page.html``); resolve against
+    ``run_dir`` when provided so MCP CWD cannot miss the file.
     """
     import html as _html_mod
+
+    from uiforgemax.pipeline.visual_sot import resolve_run_path
 
     components: list[dict[str, Any]] = []
     interactions: list[dict[str, Any]] = []
     regions: list[dict[str, Any]] = []
 
+    path = resolve_run_path(run_dir, html_path) if run_dir else None
+    if path is None:
+        candidate = Path(html_path)
+        path = candidate if candidate.is_absolute() and candidate.exists() else None
     try:
-        from pathlib import Path as _P
-        raw = _P(html_path).read_text(encoding="utf-8", errors="ignore") if _P(html_path).exists() else ""
+        raw = path.read_text(encoding="utf-8", errors="ignore") if path else ""
     except OSError:
         raw = ""
 
@@ -531,6 +546,7 @@ def normalize_run(run_dir: Path, policy: str, feedback: str | None = None) -> tu
             prompt=prompt_text,
             sot=sot,
             has_image=has_image,
+            run_dir=run_dir,
         )
         (run_dir / "visual-spec.json").write_text(json.dumps(visual, indent=2), encoding="utf-8")
     elif not skip_visual and greenfield:
