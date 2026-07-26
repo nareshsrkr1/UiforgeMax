@@ -8,9 +8,11 @@ visual/test verify. If MCP is not connected, **stop**.
 **Before plan approval:** prefer Graphify evidence via `uiforgemax_advance` —
 do not wander the target repo to invent the plan.
 
-**After plan approval (`awaiting_ide_apply`):** use IDE **Read / Edit / Write** on
-the listed target paths, then call `uiforgemax_advance` to verify. Do **not**
-push full file bodies through MCP mediation.
+**After plan approval (`awaiting_ide_apply`):** implement **only**
+`plans/approved-plan.json` / `ideApplyBrief` paths with IDE **Read / Edit / Write**,
+then `uiforgemax_advance` **once**. At `doNotAdvanceUntilEdited`: edit first —
+do not blind-advance. Do **not** follow a drifted draft plan or push file bodies
+via MCP.
 
 **Opaque / oversized tool results — do NOT stop:** call
 `uiforgemax_get_run_status(run_id)` and continue with `nextTool` /
@@ -25,11 +27,11 @@ push full file bodies through MCP mediation.
 5. At plan gate: **STOP for the human** (`waitForHuman`). Enumerate every
    `filesToCreate` / `filesToModify` path. Do not auto-`approve_plan`
    (unless `UIFORGEMAX_SKIP_PLAN_APPROVAL=1`).
-6. After approve: implement with IDE tools → `uiforgemax_advance` (verify /
+6. After approve: IDE-edit locked paths only → `uiforgemax_advance` once (verify /
    visual / test).
 
-Follow `nextTool`. At `awaiting_mediation`, use `mediationBrief` +
-`uiforgemax_submit_mediation` (intent JSON only for plans — no file bodies).
+Follow `nextTool` except at IDE-apply pause (edit first). At `awaiting_mediation`,
+use `mediationBrief` + `uiforgemax_submit_mediation` (intent JSON only for plans).
 
 ## Do not pause to ask — just drive the pipeline
 

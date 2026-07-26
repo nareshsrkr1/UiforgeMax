@@ -8,9 +8,19 @@ mode: 'agent'
 **MCP orchestrates; IDE writes after plan approval.**
 
 If MCP is unavailable: **STOP**. Before plan approval: Graphify-first (no wandering the
-target repo to invent the plan). After `awaiting_ide_apply`: IDE Read/Edit/Write the
-listed paths, then `uiforgemax_advance`. PLAN_REFINEMENT is **intent only** — no full
-file bodies over MCP.
+target repo to invent the plan).
+
+**After plan approval (`awaiting_ide_apply` / `ideApplyBrief`):** implement **only**
+paths from `plans/approved-plan.json` (same list as `ideApplyBrief`). IDE
+Read/Edit/Write those files, then `uiforgemax_advance` **once** to verify. Do **not**
+follow a later draft `implementation-plan.json`, invent extra files, or send full
+file bodies through `submit_mediation`.
+
+**At `doNotAdvanceUntilEdited`:** **STOP calling advance** until every brief path is
+edited. Blind advance/resume causes the partial-implement loop.
+
+PLAN_REFINEMENT is **intent only** (`path` / `purpose` / `changeSummary`) — no `content`
+over MCP.
 
 **Opaque results:** `uiforgemax_get_run_status` → continue.
 
@@ -84,8 +94,9 @@ Preflight must find it on the session python. Artifacts land in each repo's `gra
 | Sample FastAPI + React | `…/Project` |
 | Greenfield | empty folder path |
 
-After plan approval (`awaiting_ide_apply`): IDE Read/Edit/Write listed paths, then
-`uiforgemax_advance`. PLAN_REFINEMENT is intent-only — no full file bodies over MCP.
+After plan approval (`awaiting_ide_apply`): IDE Read/Edit/Write **only**
+`approved-plan.json` / `ideApplyBrief` paths, then `uiforgemax_advance` once.
+PLAN_REFINEMENT is intent-only — no full file bodies over MCP.
 TEST_GENERATION chooses the stack’s runner (pytest / vitest / junit / go test / …).
 
 ## Typical session
@@ -102,8 +113,10 @@ TEST_GENERATION chooses the stack’s runner (pytest / vitest / junit / go test 
      with no mediation. Sub-tasks drive per-sub-task Graphify queries and structured plans.
 5. Sole human gate: **STOP** at `awaiting_plan_approval`. Enumerate every
    `filesToCreate` / `filesToModify` path. Do not auto-approve.
-   After approve → `awaiting_ide_apply`: IDE Read/Edit/Write those paths, then
-   `uiforgemax_advance` → verify → post-implement review → visual → tests.
+   After approve → plan freezes to `plans/approved-plan.json` → `awaiting_ide_apply`:
+   IDE Read/Edit/Write **only those locked paths**, then `uiforgemax_advance` once
+   → verify → post-implement review → visual → tests.
+   If `doNotAdvanceUntilEdited` is set: do not advance/resume until edits are done.
    - Understanding is auto-recorded (no separate approve_understanding).
    - Dev/CI: `UIFORGEMAX_SKIP_PLAN_APPROVAL=1` skips the human gate.
    - VISUAL_VALIDATE stage (after implement, when any visual SoT exists — HTML, wireframe,
@@ -157,12 +170,14 @@ reactive path is a fallback for the unexpected case, not the normal flow.
 ## Rules
 
 1. Graphify-first before plan; IDE Write after plan approval.
-2. Follow `nextTool`.
+2. Follow `nextTool` — except at `awaiting_ide_apply` / `doNotAdvanceUntilEdited`,
+   where `nextTool` may be null: **edit first**, then advance once.
 3. Stop if MCP unavailable.
 4. Preflight first.
 5. Plan gate: enumerate paths; wait for human.
 6. Mediation: intent JSON only for plans. Opaque → `get_run_status`.
-7. `awaiting_ide_apply`: edit listed paths, then `advance`.
+7. `awaiting_ide_apply`: edit **only** `approved-plan.json` / `ideApplyBrief` paths,
+   then `advance` once. Never invent extras or follow a drifted draft plan.
 8. Never ask "should I continue?"
 9. No git from MCP — human commits when ready.
 

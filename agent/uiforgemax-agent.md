@@ -7,9 +7,14 @@ If `uiforgemax_*` tools are unavailable: **STOP** — enable the `uiforgemax` MC
 **Before plan approval:** do not wander the target repo to invent the plan — Graphify
 inside `uiforgemax_advance` finds targets. You may Read MCP `runsDir` artifacts.
 
-**After plan approval (`awaiting_ide_apply` / `ideApplyBrief`):** use IDE
-**Read / Edit / Write** on the listed target paths, then `uiforgemax_advance` to verify.
-Do **not** send full file bodies through `submit_mediation`.
+**After plan approval (`awaiting_ide_apply` / `ideApplyBrief`):** implement **only**
+paths from the locked `plans/approved-plan.json` (same list as `ideApplyBrief`).
+Use IDE **Read / Edit / Write** on those paths, then `uiforgemax_advance` **once**
+to verify. Do **not** follow a later draft `implementation-plan.json`, invent extra
+files, or send full file bodies through `submit_mediation`.
+
+**At `doNotAdvanceUntilEdited`:** **STOP calling advance** until every brief path
+is edited. Blind advance/resume causes the partial-implement loop.
 
 **PLAN_REFINEMENT = intent only:** `path`, `purpose`, `changeSummary` (and optional
 greenfield `templateId`). No `content` field over MCP.
@@ -127,8 +132,10 @@ runner (pytest / vitest / junit / go test / …).
      with no mediation. Sub-tasks drive per-sub-task Graphify queries and structured plans.
 5. Sole human gate: **STOP** at `awaiting_plan_approval`. Enumerate every
    `filesToCreate` / `filesToModify` path. Do not auto-approve.
-   After approve → `awaiting_ide_apply`: IDE Read/Edit/Write those paths, then
-   `uiforgemax_advance` → verify → post-implement review → visual → tests.
+   After approve → plan freezes to `plans/approved-plan.json` → `awaiting_ide_apply`:
+   IDE Read/Edit/Write **only those locked paths**, then `uiforgemax_advance` once
+   → verify → post-implement review → visual → tests.
+   If `doNotAdvanceUntilEdited` is set: do not advance/resume until edits are done.
    - Understanding is auto-recorded (no separate approve_understanding).
    - Dev/CI: `UIFORGEMAX_SKIP_PLAN_APPROVAL=1` skips the human gate.
    - VISUAL_VALIDATE stage (after implement, when any visual SoT exists — HTML, wireframe,
@@ -223,8 +230,9 @@ reactive path is a fallback for the unexpected case, not the normal flow.
 7. At `awaiting_mediation`, use `mediationBrief` + `submit_mediation` (intent JSON only
    for plans). Opaque advance → **get_run_status first**.
 8. At `awaiting_ide_apply` / `doNotAdvanceUntilEdited`: **STOP calling advance**.
-    Edit every `ideApplyBrief` path with IDE Read/Edit/Write first, then call
-    `advance` **once**. Blind advance/resume causes the partial-implement loop.
+    Edit every `ideApplyBrief` / `approved-plan.json` path with IDE Read/Edit/Write
+    first (no extras, no draft plan), then call `advance` **once**. Blind
+    advance/resume causes the partial-implement loop.
 9. Images: `uiforgemax_add_image(run_id, path, role)`.
 10. **Never ask "should I continue?"** — drive until plan gate / IDE apply / BLOCKED.
 11. **No git from MCP.** After files change, the human commits when ready.
