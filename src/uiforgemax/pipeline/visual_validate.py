@@ -202,3 +202,50 @@ def find_cross_view_button_leaks(
                         }
                     )
     return violations
+
+
+def find_missing_exact_texts(
+    run_dir: Path,
+    project_roots: dict[str, Path],
+) -> list[str]:
+    """Return SoT exact-copy strings missing from implemented plan files.
+
+    Only engages when compliance asks for HTML/exact copy (``matchExactly`` or
+    ``htmlExactCopy``) and ``exactTextRequirements`` is non-empty. Generic —
+    works for any intake that harvested or mediated those strings.
+    """
+    req_path = run_dir / "requirements.normalized.json"
+    plan_path = run_dir / "plans" / "approved-plan.json"
+    if not plan_path.exists():
+        plan_path = run_dir / "plans" / "implementation-plan.json"
+    if not (req_path.exists() and plan_path.exists()):
+        return []
+
+    try:
+        requirements = json.loads(req_path.read_text(encoding="utf-8"))
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    compliance = requirements.get("compliance") or plan.get("tests", {}).get("compliance") or {}
+    if not (compliance.get("matchExactly") or compliance.get("htmlExactCopy")):
+        return []
+    exact = [str(t).strip() for t in (compliance.get("exactTextRequirements") or []) if str(t).strip()]
+    if not exact:
+        return []
+
+    combined = ""
+    for action in (plan.get("create") or []) + (plan.get("modify") or []):
+        path = action.get("path")
+        root = project_roots.get(action.get("root") or "default") or project_roots.get("default")
+        if not root or not path:
+            continue
+        try:
+            combined += (Path(root) / path).read_text(encoding="utf-8", errors="ignore")
+            combined += "\n"
+        except OSError:
+            continue
+    if not combined.strip():
+        return []
+
+    return [t for t in exact if t not in combined]

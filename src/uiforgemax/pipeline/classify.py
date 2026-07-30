@@ -101,9 +101,12 @@ def build_classification_signals(state: Any, run_dir: Path) -> dict[str, Any]:
     root_path = Path(project_root) if project_root else None
     root_empty = bool(root_path and root_path.exists() and not any(root_path.iterdir()))
 
+    has_html = (run_dir / "inputs" / "page.html").exists() or "html" in modes
+
     return {
         "inputModes": modes,
         "images": images,
+        "hasHtml": has_html,
         "hasBeforeAfter": "before" in roles and "after" in roles,
         "imageCount": len(images),
         "keywords": keywords,
@@ -140,7 +143,8 @@ def default_classification(signals: dict[str, Any]) -> dict[str, Any]:
     else:
         request_type = "enhancement"
 
-    has_ui = ("image" in modes) or ("html" in modes)
+    # HTML SoT (page.html / html mode) counts as UI even when modes were jira-only.
+    has_ui = ("image" in modes) or ("html" in modes) or bool(signals.get("hasHtml"))
     has_api = bool(kw.get("api"))
     if request_type == "greenfield":
         surface = "full_stack"
@@ -162,6 +166,8 @@ def default_classification(signals: dict[str, Any]) -> dict[str, Any]:
         change_signal.append("jira_spec")
     if "prompt" in modes:
         change_signal.append("prompt_only")
+    if "html" in modes or signals.get("hasHtml"):
+        change_signal.append("html_sot")
 
     policy_by_surface = {
         "ui_only": "frontend_first",

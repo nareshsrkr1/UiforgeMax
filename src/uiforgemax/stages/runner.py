@@ -1324,13 +1324,58 @@ def _visual_validate(ctx: ToolContext, state: RunState) -> StageResult:
 
     validation = _load_json(validation_path)
 
-    from uiforgemax.pipeline.visual_validate import find_cross_view_button_leaks
+    from uiforgemax.pipeline.visual_validate import (
+        find_cross_view_button_leaks,
+        find_missing_exact_texts,
+    )
 
     roots: dict[str, Path] = {}
     if state.project_root:
         roots["default"] = Path(state.project_root)
     for name, path in (state.project_roots or {}).items():
         roots[str(name)] = Path(path)
+
+    missing_exact = find_missing_exact_texts(run_dir, roots)
+    if missing_exact:
+        results = validation.setdefault("subtaskResults", [])
+        sample = ", ".join(missing_exact[:8])
+        more = f" (+{len(missing_exact) - 8} more)" if len(missing_exact) > 8 else ""
+        if not results:
+            results.append(
+                {
+                    "subtaskId": "ST-ALL",
+                    "fidelity": 0.0,
+                    "needsReimplementation": True,
+                    "deviations": [],
+                }
+            )
+        for r in results:
+            r["needsReimplementation"] = True
+            r.setdefault("deviations", []).append(
+                {
+                    "severity": "critical",
+                    "component": "exact text",
+                    "expected": sample + more,
+                    "actual": "one or more HTML/SoT exactTextRequirements missing from implemented files",
+                    "fix": (
+                        "Restore verbatim SoT labels from requirements.compliance."
+                        "exactTextRequirements / inputs/page.html — do not singularize "
+                        "or invent near-synonyms."
+                    ),
+                }
+            )
+            r["fixInstructions"] = (
+                (r.get("fixInstructions") or "")
+                + f" Missing exact SoT text: {sample}{more}."
+            ).strip()
+        validation["passesVisualGate"] = False
+        validation["mechanicalExactTextFailures"] = missing_exact
+        state.record(
+            Stage.VISUAL_VALIDATE,
+            "exact_text_missing",
+            f"{len(missing_exact)} exactTextRequirement(s) missing from implementation",
+        )
+
     leaks = find_cross_view_button_leaks(run_dir, roots)
     if leaks:
         results = validation.setdefault("subtaskResults", [])

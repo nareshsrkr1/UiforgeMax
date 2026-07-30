@@ -244,6 +244,14 @@ def add_jira(ctx: ToolContext, run_id: str, issue_key: str) -> str:
     missing = [a.get("filename") or "?" for a in stored if not a.get("storedAs")]
 
     state.add_mode("jira")
+    # Promoted Jira HTML is SoT — register html mode so classify/flow see UI work
+    # the same way as uiforgemax_add_html (page.html alone used to leave modes=jira only).
+    if (run_dir / "inputs" / "page.html").exists() or any(
+        (a.get("role") == "html" or str(a.get("mimeType") or "").startswith("text/html"))
+        and a.get("storedAs")
+        for a in stored
+    ):
+        state.add_mode("html")
     state.inputs.setdefault("jira", {})["issueKey"] = issue_key
     state.inputs["jira"]["attachmentsStored"] = copied
     state.inputs["jira"]["attachmentsMissing"] = missing

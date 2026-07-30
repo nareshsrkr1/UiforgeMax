@@ -176,30 +176,55 @@ def _extract_html_structure(
             "uncertainFields": ["html file not readable"],
         }
 
-    # Headings
-    for m in re.finditer(r"<h([1-6])[^>]*>([^<]+)", raw, re.I):
-        level, text = m.group(1), _html_mod.unescape(m.group(2).strip())
-        if text:
-            components.append({"type": f"Heading{level}", "text": text, "confidence": 0.9})
+    def _plain(inner: str) -> str:
+        """Strip nested tags / collapse whitespace — works for HTML-in-JS templates too."""
+        text = re.sub(r"<[^>]+>", " ", inner)
+        text = _html_mod.unescape(text)
+        return re.sub(r"\s+", " ", text).strip()
 
-    # Buttons (button tags + input[type=submit/button] + role=button)
-    for m in re.finditer(r"<button[^>]*>([^<]+)<", raw, re.I):
-        text = _html_mod.unescape(m.group(1).strip())
+    # Headings (allow nested spans inside h1–h6)
+    for m in re.finditer(r"<h([1-6])[^>]*>(.*?)</h\1>", raw, re.I | re.S):
+        text = _plain(m.group(2))
+        if text:
+            components.append({"type": f"Heading{m.group(1)}", "text": text, "confidence": 0.9})
+
+    # Buttons (nested children ok) + input[type=submit/button] value
+    for m in re.finditer(r"<button\b[^>]*>(.*?)</button>", raw, re.I | re.S):
+        text = _plain(m.group(1))
         if text:
             components.append({"type": "Button", "label": text, "confidence": 0.85})
-            interactions.append({"trigger": f"Click: {text}", "expectedBehavior": "(from requirement)", "confidence": 0.6})
-    # input[type=submit/button] with value attribute
-    for m in re.finditer(r'<input[^>]+type=[\"\'](?:submit|button)[\"\'][^>]*value=[\"\']([^\"\']+)[\"\']', raw, re.I):
+            interactions.append(
+                {
+                    "trigger": f"Click: {text}",
+                    "expectedBehavior": "(from requirement)",
+                    "confidence": 0.6,
+                }
+            )
+    for m in re.finditer(
+        r'<input[^>]+type=[\"\'](?:submit|button)[\"\'][^>]*value=[\"\']([^\"\']+)[\"\']',
+        raw,
+        re.I,
+    ):
         text = _html_mod.unescape(m.group(1).strip())
         if text:
             components.append({"type": "Button", "label": text, "confidence": 0.8})
 
-    # Form inputs / labels
-    for m in re.finditer(r"<label[^>]*>([^<]+)<", raw, re.I):
+    # Accessible / tooltip labels on interactive elements (generic SoT cues)
+    for m in re.finditer(
+        r"<(?:button|a|input|select|textarea|div|span)[^>]+"
+        r"(?:aria-label|title)=[\"']([^\"']+)[\"']",
+        raw,
+        re.I,
+    ):
         text = _html_mod.unescape(m.group(1).strip())
         if text:
+            components.append({"type": "Label", "text": text, "confidence": 0.75})
+
+    # Form inputs / labels
+    for m in re.finditer(r"<label\b[^>]*>(.*?)</label>", raw, re.I | re.S):
+        text = _plain(m.group(1))
+        if text:
             components.append({"type": "Label", "text": text, "confidence": 0.8})
-    # input placeholder
     for m in re.finditer(r'<input[^>]+placeholder=[\"\']([^\"\']+)[\"\']', raw, re.I):
         ph = _html_mod.unescape(m.group(1).strip())
         if ph:
@@ -212,9 +237,14 @@ def _extract_html_structure(
 
     # Tables → DataGrid hint
     if re.search(r"<table[\s>]", raw, re.I):
-        headers = re.findall(r"<th[^>]*>([^<]+)", raw, re.I)
-        cols = [_html_mod.unescape(h.strip()) for h in headers if h.strip()]
+        headers = re.findall(r"<th[^>]*>(.*?)</th>", raw, re.I | re.S)
+        cols = [_plain(h) for h in headers if _plain(h)]
         components.append({"type": "Table", "columns": cols or [], "confidence": 0.85})
+
+    # JS/TS mockup helpers: label:/title:/heading: "…" and kpi("…") style first-args.
+    # Generic — not ticket-specific; only short human-facing strings.
+    for text in _extract_js_ui_strings(raw, unescape=_html_mod.unescape):
+        components.append({"type": "Text", "text": text, "confidence": 0.7, "source": "js_ui_string"})
 
     # Deduplicate by (type, primary text field)
     seen: set[str] = set()
@@ -225,6 +255,8 @@ def _extract_html_structure(
             seen.add(key)
             deduped.append(c)
 
+    exact_from_html = harvest_exact_texts_from_components(deduped)
+
     return {
         "layout": {"regions": regions},
         "components": deduped,
@@ -232,7 +264,157 @@ def _extract_html_structure(
         "visualTokens": {"colors": [], "typography": [], "spacing": []},
         "uncertainFields": ["tokens", "exact_layout_bounds", "interactions"],
         "viewButtonMap": _extract_view_button_map(raw, unescape=_html_mod.unescape),
+        "exactTextHints": exact_from_html,
     }
+
+
+_JS_UI_PROP_RE = re.compile(
+    r"\b(?:label|title|heading|caption|placeholder|ariaLabel|buttonText|name|text)\s*[:=]\s*"
+    r"[\"']([^\"'\n]{2,80})[\"']",
+    re.I,
+)
+_JS_UI_CALL_RE = re.compile(
+    r"\b(?:kpi|metric|stat|label|title|heading|caption|badge|tab|navItem)\s*\(\s*"
+    r"[\"']([^\"'\n]{2,80})[\"']",
+    re.I,
+)
+# Paths / URLs (case-insensitive). ALL_CAPS constants checked separately
+# without IGNORECASE so short labels like "Bind" / "Live" are kept.
+_JS_UI_PATH_RE = re.compile(
+    r"^(https?://|/|\./|\.\./|[a-z]+://|[a-z_][a-z0-9_]*\.[a-z]{1,5})$",
+    re.I,
+)
+
+
+def _looks_like_ui_copy(text: str) -> bool:
+    t = text.strip()
+    if len(t) < 2 or len(t) > 80:
+        return False
+    if not re.search(r"[A-Za-z]", t):
+        return False
+    if _JS_UI_PATH_RE.match(t):
+        return False
+    # SCREAMING_SNAKE / ALL_CAPS constants (not Title Case button labels).
+    if re.fullmatch(r"[A-Z][A-Z0-9_]{2,}", t):
+        return False
+    if re.search(r"[{};=<>]|function\b|return\b", t):
+        return False
+    # Identifiers / code tokens (snake_case, camelCase) — not user-visible copy.
+    if " " not in t and ("_" in t or re.fullmatch(r"[a-z]+(?:[A-Z][a-z0-9]*)+", t)):
+        return False
+    return True
+
+
+def _extract_js_ui_strings(raw: str, *, unescape: Any) -> list[str]:
+    """Pull short human-facing strings from JS/TS mockup helpers (generic).
+
+    Covers ``title: "My datasets"`` and ``kpi("Pending governance", …)`` style
+    copy inside HTML-as-JS SoT files — without scraping every string literal.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+    for rx in (_JS_UI_PROP_RE, _JS_UI_CALL_RE):
+        for m in rx.finditer(raw):
+            text = unescape(m.group(1).strip())
+            key = text.lower()
+            if key in seen or not _looks_like_ui_copy(text):
+                continue
+            seen.add(key)
+            found.append(text)
+    return found
+
+
+def harvest_exact_texts_from_components(
+    components: list[dict[str, Any]],
+    *,
+    limit: int = 40,
+) -> list[str]:
+    """Stable, de-duped exact-copy list from mechanical HTML extract components."""
+    # Prefer interactive / heading labels; then general text / columns.
+    priority = ("Button", "Heading1", "Heading2", "Heading3", "Label", "Input", "Text", "Table")
+    buckets: dict[str, list[str]] = {k: [] for k in priority}
+    other: list[str] = []
+    seen: set[str] = set()
+
+    def _add(bucket: str, text: str) -> None:
+        t = re.sub(r"\s+", " ", (text or "").strip())
+        if not t or not _looks_like_ui_copy(t):
+            return
+        key = t.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        if bucket in buckets:
+            buckets[bucket].append(t)
+        else:
+            other.append(t)
+
+    for c in components:
+        ctype = str(c.get("type") or "")
+        if c.get("label"):
+            _add(ctype if ctype in buckets else "Button", str(c["label"]))
+        if c.get("text"):
+            _add(ctype if ctype in buckets else "Text", str(c["text"]))
+        if c.get("placeholder"):
+            _add("Input", str(c["placeholder"]))
+        for col in c.get("columns") or []:
+            _add("Table", str(col))
+
+    out: list[str] = []
+    for key in priority:
+        out.extend(buckets[key])
+        if len(out) >= limit:
+            return out[:limit]
+    out.extend(other)
+    return out[:limit]
+
+
+def apply_html_sot_to_compliance(
+    requirements: dict[str, Any],
+    visual: dict[str, Any],
+    *,
+    sot: dict[str, Any] | None = None,
+) -> None:
+    """Merge HTML-derived exact copy into compliance when HTML is primary SoT.
+
+    - Always merge ``exactTextHints`` / component labels into ``exactTextRequirements``
+      (mediation may refine later; empty exact list was the main gap).
+    - Set ``matchExactly=True`` only when HTML is the primary reference **and**
+      we harvested enough concrete labels (≥3). Sparse HTML / prompt-only stays soft.
+    """
+    sot = sot or requirements.get("sourceOfTruth") or {}
+    if not sot.get("primaryHtml") and not visual.get("htmlDerived"):
+        return
+
+    hints = list(visual.get("exactTextHints") or [])
+    if not hints:
+        hints = harvest_exact_texts_from_components(list(visual.get("components") or []))
+    if not hints:
+        return
+
+    comp = requirements.setdefault("compliance", {})
+    existing = [str(x) for x in (comp.get("exactTextRequirements") or []) if x]
+    seen = {x.lower() for x in existing}
+    for text in hints:
+        if text.lower() in seen:
+            continue
+        seen.add(text.lower())
+        existing.append(text)
+    comp["exactTextRequirements"] = existing[:40]
+    comp.setdefault("referencePath", sot.get("primaryHtml") or visual.get("referenceHtml"))
+
+    # Rich HTML SoT → require verbatim copy; leave Jira match-exactly as-is if already true.
+    if sot.get("primaryHtml") and len(existing) >= 3:
+        comp["matchExactly"] = True
+        comp["htmlExactCopy"] = True
+        note = (
+            "HTML source-of-truth present — exactTextRequirements harvested mechanically "
+            "from labels/headings/buttons (and JS UI helper strings). "
+            "Match copy/structure; mediation may refine the list, not drop SoT labels."
+        )
+        assumptions = requirements.setdefault("assumptions", [])
+        if note not in assumptions:
+            assumptions.append(note)
 
 
 def _extract_view_button_map(raw: str, *, unescape: Any) -> dict[str, list[str]]:
@@ -268,8 +450,9 @@ def _extract_view_button_map(raw: str, *, unescape: Any) -> dict[str, list[str]]
         body = raw[start:i]
         labels: list[str] = []
         seen_labels: set[str] = set()
-        for bm in re.finditer(r"<button[^>]*>([^<]+)<", body, re.I):
-            text = unescape(bm.group(1).strip())
+        for bm in re.finditer(r"<button\b[^>]*>(.*?)</button>", body, re.I | re.S):
+            text = re.sub(r"<[^>]+>", " ", bm.group(1))
+            text = re.sub(r"\s+", " ", unescape(text)).strip()
             if text and text not in seen_labels:
                 seen_labels.add(text)
                 labels.append(text)
@@ -592,6 +775,16 @@ def normalize_run(run_dir: Path, policy: str, feedback: str | None = None) -> tu
             has_image=has_image,
             run_dir=run_dir,
         )
+        # Image path returns a mediation shell and skips DOM extract — still harvest
+        # exact copy from page.html when HTML SoT is present (any intake combo).
+        if sot.get("primaryHtml") and not visual.get("exactTextHints"):
+            html_bits = _extract_html_structure(str(sot["primaryHtml"]), run_dir=run_dir)
+            visual["exactTextHints"] = list(html_bits.get("exactTextHints") or [])
+            if html_bits.get("viewButtonMap") and not visual.get("viewButtonMap"):
+                visual["viewButtonMap"] = html_bits["viewButtonMap"]
+            if not visual.get("htmlDerived"):
+                visual["htmlExactTextSource"] = sot.get("primaryHtml")
+        apply_html_sot_to_compliance(requirements, visual, sot=sot)
         (run_dir / "visual-spec.json").write_text(json.dumps(visual, indent=2), encoding="utf-8")
     elif not skip_visual and greenfield:
         visual = {
