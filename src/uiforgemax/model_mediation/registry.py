@@ -630,6 +630,10 @@ def build_mediation_request(
                 "For visual ACs (layout, dark mode, contrast): add Playwright e2e tests. Mark "
                 "Playwright run[] with suite='playwright' (optional). MCP tries ONE project-local "
                 "install; if unavailable, Playwright is soft-skipped — unit tests still decide pass.\n"
+                "For React/Angular/Vue/Svelte UI apps: MCP ALSO runs a production build check "
+                "(npm run build / ng build / vite build) after installs and before unit/e2e. "
+                "You may add suite='build' yourself; if you do, MCP will not double-run it. "
+                "Set skipUiBuild=true only with a concrete reason.\n"
                 "If deps are not installed, include installHints[] in THIS response "
                 "(npm install / pip install / mvn dependency:resolve / dotnet restore / …) — "
                 "do not assume MCP PATH has tools or that packages are already installed.\n"
@@ -689,10 +693,11 @@ def build_mediation_request(
                         "cwd": ".",
                         "root": "default",
                         "coverage": False,
-                        "suite": "unit|dom|playwright — use playwright for e2e (optional soft)",
+                        "suite": "unit|dom|playwright|build — playwright=e2e (soft); build=optional override of MCP UI build",
                         "required": "false for playwright unless you must hard-fail without browser",
                     }
                 ],
+                "skipUiBuild": "optional true — skip MCP npm/ng/vite production build (rare)",
                 "coverage": {
                     "required": True,
                     "linesThreshold": 70,
@@ -805,7 +810,12 @@ def build_mediation_request(
                 "(e.g. 'users CRUD', 'auth middleware', 'notification service')\n\n"
                 "RULES:\n"
                 "1. Every acceptance criterion MUST be linked to exactly one sub-task.\n"
-                "2. Sub-tasks should align with visual regions when images/wireframes exist.\n"
+                "2. Sub-tasks should align with visual regions when images/wireframes exist. "
+                "When the SoT is HTML and visual-spec.json has a viewButtonMap (per-render-"
+                "function button labels), set visualRegion.regionId to the LITERAL render "
+                "function name that owns this sub-task's screen (e.g. 'renderMyData'), not an "
+                "invented id — this lets a deterministic check catch a button that's textually "
+                "correct but was copied from a sibling screen's render function.\n"
                 "3. Dependencies between sub-tasks must be explicit (e.g., ST-2 depends on ST-1 "
                 "if ST-2's component imports from ST-1's output).\n"
                 "4. Each sub-task gets focusKeywords (5-10 short tokens) that will drive "

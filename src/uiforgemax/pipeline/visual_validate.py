@@ -7,11 +7,14 @@ re-implementation for sub-tasks below the fidelity threshold.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from uiforgemax.pipeline.visual_sot import detect_visual_references
 from uiforgemax.state import RunState
+
+_BUTTON_RE = re.compile(r"<button[^>]*>\s*([^<{][^<]*?)\s*</button>", re.I)
 
 
 def should_run_visual_validation(run_dir: Path, state: RunState) -> bool:
@@ -115,3 +118,87 @@ def prepare_delta_reimplementation(
         state.subtask_progress[st_id] = "needs_reimplementation"
 
     return delta
+
+
+def find_cross_view_button_leaks(
+    run_dir: Path,
+    project_roots: dict[str, Path],
+) -> list[dict[str, Any]]:
+    """Flag a subtask whose implementation renders a button that the HTML SoT
+    attributes to a DIFFERENT render function than this subtask's own screen.
+
+    Copy-fidelity checks only ask "does this text match the HTML somewhere" —
+    a button that's textually correct but was copied from a sibling screen
+    (e.g. the Console page's "Register a physical dataset" button leaking onto
+    the My Datasets page) passes that check every time. This asks the other
+    question: does it belong on THIS screen.
+
+    Only engages when a subtask's ``visualRegion.regionId`` is the literal HTML
+    render-function name (a ``viewButtonMap`` key from mechanical HTML
+    extraction) — anything else (an invented region id, no visual-spec, no
+    plan) is skipped rather than guessed at.
+    """
+    visual_spec_path = run_dir / "visual-spec.json"
+    subtasks_path = run_dir / "plans" / "subtasks.json"
+    plan_path = run_dir / "plans" / "approved-plan.json"
+    if not (visual_spec_path.exists() and subtasks_path.exists() and plan_path.exists()):
+        return []
+
+    try:
+        view_map: dict[str, list[str]] = (
+            json.loads(visual_spec_path.read_text(encoding="utf-8")).get("viewButtonMap") or {}
+        )
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not view_map:
+        return []
+
+    owner_by_label: dict[str, set[str]] = {}
+    for func_name, labels in view_map.items():
+        for label in labels:
+            owner_by_label.setdefault(label.strip().lower(), set()).add(func_name)
+
+    try:
+        subtasks = json.loads(subtasks_path.read_text(encoding="utf-8")).get("subtasks", [])
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    files_by_subtask: dict[str, list[dict[str, Any]]] = {}
+    for action in (plan.get("create") or []) + (plan.get("modify") or []):
+        st_id = action.get("subtaskId")
+        if st_id:
+            files_by_subtask.setdefault(st_id, []).append(action)
+
+    violations: list[dict[str, Any]] = []
+    for st in subtasks:
+        region = st.get("visualRegion") or {}
+        region_id = region.get("regionId")
+        if not region_id or region_id not in view_map:
+            continue  # not a literal render-function name — nothing to check
+        st_id = st.get("id") or st.get("subtaskId")
+        for action in files_by_subtask.get(st_id, []):
+            path = action.get("path")
+            root = project_roots.get(action.get("root") or "default") or project_roots.get("default")
+            if not root or not path:
+                continue
+            try:
+                text = (Path(root) / path).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for m in _BUTTON_RE.finditer(text):
+                label = m.group(1).strip()
+                owners = owner_by_label.get(label.lower())
+                if not owners:
+                    continue  # not a literal SoT button label — out of scope
+                if region_id not in owners:
+                    violations.append(
+                        {
+                            "subtaskId": st_id,
+                            "file": path,
+                            "buttonLabel": label,
+                            "expectedView": region_id,
+                            "actualOwningViews": sorted(owners),
+                        }
+                    )
+    return violations

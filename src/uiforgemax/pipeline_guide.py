@@ -197,12 +197,15 @@ PIPELINE_GUIDE = {
             "description": (
                 "IDE TEST_GENERATION (stack-dynamic): model chooses framework/paths/commands "
                 "(Java/Maven, pytest, vitest, go test, …). MCP writes mediated test files and "
-                "runs mediated run[] commands. If a tool is missing, pauses for "
-                "TEST_ENV_RECOVERY (alternate run[] / allowlisted installHints / skipTests), "
-                "then retries once."
+                "runs mediated run[] commands. For React/Angular/Vue/Svelte UI roots, MCP also "
+                "runs a production build (`npm run build` / `ng build` / `vite build`) after "
+                "installs and before unit/e2e — hard-fail on non-zero. If a tool is missing, "
+                "pauses for TEST_ENV_RECOVERY (alternate run[] / allowlisted installHints / "
+                "skipTests), then retries once."
             ),
             "outputs": [
                 "tests/generated-tests.json",
+                "tests/ui-build-status.json",
                 "tests/unit-results.json",
                 "tests/env-gap.json",
                 "tests/recovery-log.json",

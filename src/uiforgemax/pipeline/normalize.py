@@ -231,7 +231,51 @@ def _extract_html_structure(
         "interactions": interactions,
         "visualTokens": {"colors": [], "typography": [], "spacing": []},
         "uncertainFields": ["tokens", "exact_layout_bounds", "interactions"],
+        "viewButtonMap": _extract_view_button_map(raw, unescape=_html_mod.unescape),
     }
+
+
+def _extract_view_button_map(raw: str, *, unescape: Any) -> dict[str, list[str]]:
+    """Map each top-level ``function renderX(){...}`` block to its own literal
+    button labels — e.g. ``{"renderMyData": ["Bind"], "renderProducerConsole":
+    ["Register a physical dataset", ...]}``.
+
+    A JS-templated SoT (like a single-page mockup) renders each screen from its
+    own function; a button that's textually correct but sourced from a SIBLING
+    function (e.g. the Console page's "Register a physical dataset" leaking
+    onto the My Datasets page) is invisible to copy-fidelity checks — they only
+    ask "does this text match the HTML somewhere", not "does it belong on THIS
+    screen". This map lets a downstream check ask the second question.
+
+    Best-effort brace counting (no JS parser) — skips a function if its closing
+    brace can't be found instead of guessing wrong.
+    """
+    view_map: dict[str, list[str]] = {}
+    for m in re.finditer(r"function\s+(\w+)\s*\([^)]*\)\s*\{", raw):
+        name = m.group(1)
+        start = m.end()
+        depth = 1
+        i = start
+        while i < len(raw) and depth > 0:
+            ch = raw[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            continue  # unbalanced — skip rather than mis-attribute
+        body = raw[start:i]
+        labels: list[str] = []
+        seen_labels: set[str] = set()
+        for bm in re.finditer(r"<button[^>]*>([^<]+)<", body, re.I):
+            text = unescape(bm.group(1).strip())
+            if text and text not in seen_labels:
+                seen_labels.add(text)
+                labels.append(text)
+        if labels:
+            view_map[name] = labels
+    return view_map
 
 
 def _extract_prompt_intent(prompt: str) -> dict[str, Any]:

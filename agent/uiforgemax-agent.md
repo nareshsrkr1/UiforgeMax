@@ -145,6 +145,8 @@ runner (pytest / vitest / junit / go test / …).
    - Tests are stack-dynamic via TEST_GENERATION — the IDE model owns install +
      run strategy (`installHints[]` + `run[]`). MCP executes allowlisted installs
      and rewrites npm/node paths; it does not invent a fixed install workflow.
+     For React/Angular/Vue/Svelte UI apps, MCP also runs a production build
+     (`npm run build` / `ng` / `vite`) after installs — hard-fail if it breaks.
      For Node/React UI: require DOM (Testing Library) tests in `run[]`, and add
      Playwright e2e (`suite: playwright`) for visual ACs. MCP tries one project-local
      Playwright+Chromium install; if unavailable, soft-skips e2e and writes

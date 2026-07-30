@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from uiforgemax.env_flags import install_timeout_seconds
+from uiforgemax.graphify.stack import detect_stack
 from uiforgemax.pipeline.implement import resolve_root
 from uiforgemax.pipeline.toolchain import (
     collect_toolchain_facts,
@@ -28,6 +29,10 @@ from uiforgemax.pipeline.toolchain import (
     run_with_timeout,
     subprocess_env,
 )
+
+# Frontend stacks that should get a production build check in TEST.
+_UI_STACK_KINDS = frozenset({"react", "angular", "vue", "svelte"})
+_UI_BUILD_TIMEOUT_SEC = 300
 
 MAX_FIX_ATTEMPTS = 2
 INSTALL_WAIT_PATH = "tests/install-wait.json"
@@ -70,6 +75,198 @@ def apply_generated_tests(project_root: Path | dict[str, Path], run_dir: Path) -
     return written
 
 
+def _read_package_scripts(pkg_json: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(pkg_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    scripts = data.get("scripts") if isinstance(data, dict) else None
+    return scripts if isinstance(scripts, dict) else {}
+
+
+def _is_ui_frontend_root(root: Path) -> bool:
+    """True when this root looks like a React/Angular/Vue/Svelte (or similar) UI app."""
+    stack = detect_stack(root)
+    kinds = {str(k).lower() for k in (stack.get("kinds") or [])}
+    if kinds & _UI_STACK_KINDS:
+        return True
+    # Strong markers even if detect_stack missed (sparse trees / tmp fixtures).
+    if (root / "angular.json").exists():
+        return True
+    for name in ("vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs"):
+        if (root / name).exists() and (
+            any(root.glob("*.tsx"))
+            or any(root.glob("*.jsx"))
+            or (root / "index.html").exists()
+            or (root / "src" / "index.html").exists()
+        ):
+            return True
+    return False
+
+
+def resolve_ui_build_command(root: Path) -> dict[str, Any] | None:
+    """Pick one production build command for a UI root, or None to skip.
+
+    Preference: ``package.json`` ``scripts.build`` → ``npm run build``;
+    else Angular CLI; else Vite. Never invent a build for non-UI / API-only roots.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return None
+    ws = find_js_workspace_root(root) or root
+    if not _is_ui_frontend_root(root) and not _is_ui_frontend_root(ws):
+        return None
+
+    pkg = ws / "package.json" if (ws / "package.json").exists() else root / "package.json"
+    scripts = _read_package_scripts(pkg) if pkg.exists() else {}
+    if "build" in scripts:
+        return {
+            "command": "npm run build",
+            "cwd": str(ws.resolve()),
+            "rootPath": str(root.resolve()),
+            "reason": "package.json scripts.build",
+        }
+
+    angular = ws / "angular.json" if (ws / "angular.json").exists() else root / "angular.json"
+    if angular.exists():
+        return {
+            "command": "npx ng build",
+            "cwd": str(ws.resolve()),
+            "rootPath": str(root.resolve()),
+            "reason": "angular.json (no scripts.build)",
+        }
+
+    for name in ("vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs"):
+        if (ws / name).exists() or (root / name).exists():
+            return {
+                "command": "npx vite build",
+                "cwd": str(ws.resolve()),
+                "rootPath": str(root.resolve()),
+                "reason": f"{name} (no scripts.build)",
+            }
+    return None
+
+
+def _mediated_already_has_build(generated: dict[str, Any]) -> bool:
+    """Skip MCP auto-build when TEST_GENERATION already emitted a build suite/command."""
+    for entry in generated.get("run") or []:
+        if not isinstance(entry, dict):
+            continue
+        suite = str(entry.get("suite") or entry.get("kind") or "").lower()
+        cmd = str(entry.get("command") or "").lower()
+        if suite == "build":
+            return True
+        if any(
+            marker in cmd
+            for marker in (
+                "npm run build",
+                "pnpm run build",
+                "yarn build",
+                "ng build",
+                "vite build",
+                "nx build",
+            )
+        ):
+            return True
+    return False
+
+
+def run_ui_build_checks(
+    roots: dict[str, Path],
+    generated: dict[str, Any] | None = None,
+    *,
+    run_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Run one production build per UI root (React/Angular/Vue/…).
+
+    Hard-fails the TEST stage when the build exits non-zero. Skips when no UI
+    stack / no known build command, or when mediation already included suite=build.
+    """
+    generated = generated or {}
+    status: dict[str, Any] = {
+        "requested": False,
+        "skipped": False,
+        "passed": True,
+        "commands": [],
+        "failures": [],
+    }
+    if generated.get("skipTests") or generated.get("skipUiBuild"):
+        status["skipped"] = True
+        status["reason"] = "skipTests or skipUiBuild"
+        return status
+    if _mediated_already_has_build(generated):
+        status["skipped"] = True
+        status["reason"] = "mediated run[] already includes a build command"
+        return status
+
+    seen_cwds: set[str] = set()
+    for name, root in roots.items():
+        spec = resolve_ui_build_command(root)
+        if not spec:
+            continue
+        cwd = str(spec["cwd"])
+        if cwd in seen_cwds:
+            continue
+        seen_cwds.add(cwd)
+        status["requested"] = True
+        cmd = rewrite_js_command(str(spec["command"]))
+        entry: dict[str, Any] = {
+            "root": name,
+            "command": cmd,
+            "cwd": cwd,
+            "reason": spec.get("reason"),
+        }
+        try:
+            proc = run_with_timeout(
+                cmd,
+                cwd=cwd,
+                env=subprocess_env(),
+                timeout=_UI_BUILD_TIMEOUT_SEC,
+            )
+        except Exception as exc:  # noqa: BLE001 — surface as build failure
+            entry["ok"] = False
+            entry["error"] = str(exc)[:500]
+            status["commands"].append(entry)
+            status["passed"] = False
+            status["failures"].append(f"[build] {name}: {cmd} — {exc}")
+            continue
+
+        entry["returncode"] = getattr(proc, "returncode", None)
+        entry["timedOut"] = bool(getattr(proc, "timed_out", False))
+        out = (getattr(proc, "stdout", "") or "")[-2000:]
+        err = (getattr(proc, "stderr", "") or "")[-2000:]
+        entry["stdoutTail"] = out
+        entry["stderrTail"] = err
+        if entry["timedOut"]:
+            entry["ok"] = False
+            status["passed"] = False
+            status["failures"].append(
+                f"[build] {name}: timed out after {_UI_BUILD_TIMEOUT_SEC}s — {cmd}"
+            )
+        elif entry["returncode"] != 0:
+            entry["ok"] = False
+            status["passed"] = False
+            snippet = (err or out or "no output").strip().splitlines()
+            tail = " | ".join(snippet[-3:])[:400]
+            status["failures"].append(
+                f"[build] {name}: {cmd} exited {entry['returncode']} — {tail}"
+            )
+        else:
+            entry["ok"] = True
+        status["commands"].append(entry)
+
+    if not status["requested"]:
+        status["skipped"] = True
+        status["reason"] = "no UI frontend root with a known build command"
+
+    if run_dir is not None:
+        (run_dir / "tests").mkdir(parents=True, exist_ok=True)
+        (run_dir / "tests" / "ui-build-status.json").write_text(
+            json.dumps(status, indent=2), encoding="utf-8"
+        )
+    return status
+
+
 def run_tests(
     project_root: Path | dict[str, Path],
     plan: dict[str, Any],
@@ -89,6 +286,7 @@ def run_tests(
         "skippedTests": False,
         "installs": [],
         "playwright": {},
+        "uiBuild": {},
         "skippedAutoInstall": skip_auto_install,
     }
 
@@ -157,6 +355,22 @@ def run_tests(
         results["coverage"] = attempt_result.get("coverage") or {}
         results["playwright"] = attempt_result.get("playwright") or {}
         return results
+
+    # React/Angular/Vue/Svelte: prove `npm run build` (or ng/vite) after deps, before unit/e2e.
+    # Only when TEST mediation is active (installs/tests/run) so we don't blind-build API-only.
+    if (
+        generated.get("run")
+        or generated.get("tests")
+        or generated.get("installHints")
+    ) and not generated.get("skipUiBuild"):
+        ui_build = run_ui_build_checks(roots, generated, run_dir=run_dir)
+        results["uiBuild"] = ui_build
+        if ui_build.get("failures"):
+            results["failures"] = list(ui_build["failures"])
+            if not ui_build.get("passed", True):
+                results["passed"] = False
+                # Fail-fast: a broken production build is enough to stop TEST.
+                return results
 
     for attempt in range(1, MAX_FIX_ATTEMPTS + 2):
         attempt_result = _run_once(roots, plan, generated, run_dir=run_dir)

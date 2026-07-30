@@ -1324,6 +1324,50 @@ def _visual_validate(ctx: ToolContext, state: RunState) -> StageResult:
 
     validation = _load_json(validation_path)
 
+    from uiforgemax.pipeline.visual_validate import find_cross_view_button_leaks
+
+    roots: dict[str, Path] = {}
+    if state.project_root:
+        roots["default"] = Path(state.project_root)
+    for name, path in (state.project_roots or {}).items():
+        roots[str(name)] = Path(path)
+    leaks = find_cross_view_button_leaks(run_dir, roots)
+    if leaks:
+        results = validation.setdefault("subtaskResults", [])
+        by_id = {r.get("subtaskId"): r for r in results}
+        for v in leaks:
+            r = by_id.get(v["subtaskId"])
+            if r is None:
+                r = {"subtaskId": v["subtaskId"], "fidelity": 0.0, "deviations": []}
+                results.append(r)
+                by_id[v["subtaskId"]] = r
+            r["needsReimplementation"] = True
+            r.setdefault("deviations", []).append(
+                {
+                    "severity": "critical",
+                    "component": "button provenance",
+                    "expected": f"button only in HTML render function '{v['expectedView']}'",
+                    "actual": (
+                        f"'{v['buttonLabel']}' in {v['file']} belongs to "
+                        f"{v['actualOwningViews']} per HTML SoT, not '{v['expectedView']}'"
+                    ),
+                    "fix": (
+                        f"Remove '{v['buttonLabel']}' from this screen — the HTML SoT "
+                        f"only renders it in {v['actualOwningViews']}."
+                    ),
+                }
+            )
+            r["fixInstructions"] = (
+                (r.get("fixInstructions") or "")
+                + f" Cross-view button leak: '{v['buttonLabel']}' does not belong on this screen per HTML SoT."
+            ).strip()
+        validation["passesVisualGate"] = False
+        state.record(
+            Stage.VISUAL_VALIDATE,
+            "cross_view_leak",
+            f"{len(leaks)} button(s) sourced from a different HTML view than their screen",
+        )
+
     # Attempt count is owned by MCP code, not the model — it lives in
     # plans/visual-delta.json (written by the prior prepare_delta_reimplementation
     # call), never in the mediation's own response. The model was never asked

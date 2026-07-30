@@ -29,10 +29,21 @@ def preflight(
     has open; when given, every path (default + each component) must resolve to one of
     those folders or a subfolder of one, otherwise that check BLOCKS.
     """
+    from uiforgemax.stale_check import check_stale
+
     session = load_session()
     exe = _resolve_python_executable(python_executable or session.get("pythonExecutable"))
     checks: list[dict[str, Any]] = []
 
+    stale_warning = check_stale()
+    checks.append(
+        {
+            "name": "SERVER_FRESHNESS",
+            "ok": stale_warning is None,
+            "detail": stale_warning
+            or "MCP server process matches on-disk uiforgemax source (no stale code detected).",
+        }
+    )
     checks.append(_check_python_executable(exe))
     checks.append(_check_graphify_in_process())
     # Only probe a *different* interpreter when it isn't the flaky Store alias.
@@ -77,7 +88,7 @@ def preflight(
         }
     )
 
-    critical = {"PYTHON_EXECUTABLE", "GRAPHIFY_MODULE"}
+    critical = {"PYTHON_EXECUTABLE", "GRAPHIFY_MODULE", "SERVER_FRESHNESS"}
     if project_root or session.get("workspaceRoot"):
         critical.add("WORKSPACE")
     # Subprocess check is advisory when in-process Graphify already passed —
