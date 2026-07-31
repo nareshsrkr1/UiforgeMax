@@ -507,18 +507,27 @@ def _template_sanity_checks(roots: dict[str, Path], created: list[dict[str, Any]
 
 
 def _compliance_checks(roots: dict[str, Path], plan: dict[str, Any], files: list[dict[str, Any]]) -> list[str]:
+    from uiforgemax.pipeline.exact_copy import missing_rendered_exact_texts
+
     tests = plan.get("tests")
     compliance = tests.get("compliance", {}) if isinstance(tests, dict) else {}
-    exact_texts = compliance.get("exactTextRequirements") or []
+    exact_texts = [str(t) for t in (compliance.get("exactTextRequirements") or []) if t]
     if not exact_texts:
         return []
-    combined = ""
+    sources: list[str] = []
     for f in files:
         rel = f.get("path")
         target = resolve_root(roots, f) / rel if rel else None
         if target and target.exists():
-            combined += target.read_text(encoding="utf-8", errors="ignore")
-    return [f'exact text requirement not found: "{text}"' for text in exact_texts if text not in combined]
+            try:
+                sources.append(target.read_text(encoding="utf-8", errors="ignore"))
+            except OSError:
+                continue
+    missing = missing_rendered_exact_texts(sources, exact_texts)
+    return [
+        f'exact text requirement not found as rendered UI copy: "{text}"'
+        for text in missing
+    ]
 
 
 def _is_playwright_entry(entry: dict[str, Any], cmd: str) -> bool:

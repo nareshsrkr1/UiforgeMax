@@ -175,3 +175,73 @@ def test_find_missing_exact_texts(tmp_path: Path):
     missing = find_missing_exact_texts(run_dir, {"default": proj})
     assert "My datasets" in missing
     assert "Bind" in missing
+
+
+def test_comment_or_dead_substring_does_not_satisfy_exact_copy(tmp_path: Path):
+    """Gate must require rendered UI copy — not comment / unrelated substring hits."""
+    from uiforgemax.pipeline.exact_copy import appears_as_rendered_ui_text
+    from uiforgemax.pipeline.testing import _compliance_checks
+
+    # Drifted hero + SoT string only in a comment — old gate would pass.
+    src = (
+        "// SoT requires: My datasets\n"
+        "export function Hero() {\n"
+        "  return <h1>My Dataset</h1>;\n"
+        "}\n"
+    )
+    assert appears_as_rendered_ui_text(src, "My datasets") is False
+    assert appears_as_rendered_ui_text(src, "My Dataset") is True
+
+    good = 'export function Hero(){ return <h1>My datasets</h1>; }\n'
+    assert appears_as_rendered_ui_text(good, "My datasets") is True
+    assert appears_as_rendered_ui_text('const title = "My datasets";\n', "My datasets") is True
+
+    run_dir = tmp_path / "run"
+    proj = tmp_path / "ui"
+    proj.mkdir()
+    (proj / "Hero.tsx").write_text(src, encoding="utf-8")
+    plan = {
+        "create": [],
+        "modify": [{"path": "Hero.tsx", "root": "default"}],
+        "tests": {
+            "compliance": {
+                "matchExactly": True,
+                "exactTextRequirements": ["My datasets"],
+            }
+        },
+    }
+    fails = _compliance_checks({"default": proj}, plan, plan["modify"])
+    assert any("My datasets" in f for f in fails)
+
+
+def test_mediation_cannot_drop_html_locked_exact_texts(tmp_path: Path):
+    from uiforgemax.model_mediation.service import _merge_visual
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "visual-spec.json").write_text("{}", encoding="utf-8")
+    (run_dir / "requirements.normalized.json").write_text(
+        json.dumps(
+            {
+                "compliance": {
+                    "htmlExactCopy": True,
+                    "matchExactly": True,
+                    "exactTextRequirements": ["My datasets", "Pending governance"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    _merge_visual(
+        run_dir,
+        {
+            "matchExactly": False,
+            "exactTextRequirements": ["My Dataset"],  # drifted singular — must merge, not replace
+        },
+    )
+    req = json.loads((run_dir / "requirements.normalized.json").read_text(encoding="utf-8"))
+    assert req["compliance"]["matchExactly"] is True
+    exact = [t.lower() for t in req["compliance"]["exactTextRequirements"]]
+    assert "my datasets" in exact
+    assert "pending governance" in exact
+    assert "my dataset" in exact

@@ -208,12 +208,14 @@ def find_missing_exact_texts(
     run_dir: Path,
     project_roots: dict[str, Path],
 ) -> list[str]:
-    """Return SoT exact-copy strings missing from implemented plan files.
+    """Return SoT exact-copy strings missing as *rendered UI copy* in plan files.
 
     Only engages when compliance asks for HTML/exact copy (``matchExactly`` or
-    ``htmlExactCopy``) and ``exactTextRequirements`` is non-empty. Generic —
-    works for any intake that harvested or mediated those strings.
+    ``htmlExactCopy``). Comment-only / bare-substring hits do **not** count —
+    see ``exact_copy.appears_as_rendered_ui_text``.
     """
+    from uiforgemax.pipeline.exact_copy import missing_rendered_exact_texts
+
     req_path = run_dir / "requirements.normalized.json"
     plan_path = run_dir / "plans" / "approved-plan.json"
     if not plan_path.exists():
@@ -234,18 +236,17 @@ def find_missing_exact_texts(
     if not exact:
         return []
 
-    combined = ""
+    sources: list[str] = []
     for action in (plan.get("create") or []) + (plan.get("modify") or []):
         path = action.get("path")
         root = project_roots.get(action.get("root") or "default") or project_roots.get("default")
         if not root or not path:
             continue
         try:
-            combined += (Path(root) / path).read_text(encoding="utf-8", errors="ignore")
-            combined += "\n"
+            sources.append((Path(root) / path).read_text(encoding="utf-8", errors="ignore"))
         except OSError:
             continue
-    if not combined.strip():
+    if not sources:
         return []
 
-    return [t for t in exact if t not in combined]
+    return missing_rendered_exact_texts(sources, exact)

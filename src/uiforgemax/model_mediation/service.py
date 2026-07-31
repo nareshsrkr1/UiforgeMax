@@ -269,10 +269,25 @@ def _merge_visual(run_dir: Path, payload: dict[str, Any]) -> None:
     if req_path.exists():
         req = _load_json(req_path)
         comp = req.setdefault("compliance", {})
-        if payload.get("matchExactly") is not None:
+        # HTML SoT harvest sets htmlExactCopy — never let mediation turn exactness off
+        # or replace the list and drop mechanically harvested labels.
+        html_locked = bool(comp.get("htmlExactCopy"))
+        if payload.get("matchExactly") is not None and not html_locked:
             comp["matchExactly"] = payload["matchExactly"]
+        elif html_locked:
+            comp["matchExactly"] = True
         if payload.get("exactTextRequirements"):
-            comp["exactTextRequirements"] = payload["exactTextRequirements"]
+            incoming = [str(x) for x in payload["exactTextRequirements"] if x]
+            if html_locked:
+                existing = [str(x) for x in (comp.get("exactTextRequirements") or []) if x]
+                seen = {x.lower() for x in existing}
+                for text in incoming:
+                    if text.lower() not in seen:
+                        seen.add(text.lower())
+                        existing.append(text)
+                comp["exactTextRequirements"] = existing[:40]
+            else:
+                comp["exactTextRequirements"] = incoming[:40]
         if payload.get("sourceImage"):
             comp["referenceAttachment"] = payload["sourceImage"]
         _write_json(req_path, req)
