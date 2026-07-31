@@ -49,6 +49,7 @@ def build_visual_spec(
     has_image: bool = False,
     *,
     run_dir: Path | None = None,
+    intake_text: str = "",
 ) -> dict[str, Any]:
     """Build a visual spec from actual intake inputs — never invent demo UI.
 
@@ -95,17 +96,31 @@ def build_visual_spec(
     # HTML-only: do a lightweight mechanical extract (no LLM) — headings, links,
     # form fields, button labels — as a structural skeleton for mediation.
     if primary_html:
-        html_summary = _extract_html_structure(primary_html, run_dir=run_dir)
+        scope_text = intake_text or (prompt or "")
+        html_summary = _extract_html_structure(
+            primary_html, run_dir=run_dir, intake_text=scope_text
+        )
+        note = (
+            "Derived mechanically from inputs/page.html. VISUAL_INTERPRETATION mediation "
+            "refines component list, shell/sidebar geometry, tokens, and interactions "
+            "against the HTML source of truth."
+        )
+        if html_summary.get("primaryHtmlView"):
+            note += (
+                f" Multi-view HTML scoped to `{html_summary['primaryHtmlView']}` "
+                f"from intake text; sibling screens are out of scope."
+            )
+        elif html_summary.get("htmlViewScopeAmbiguous"):
+            note += (
+                " Multi-view HTML detected but intake did not uniquely name a screen — "
+                "mediation must choose the primary view."
+            )
         return {
             "source": primary_html,
             "confidence": 0.6,
             "visualSpecUnconfirmed": False,
             "htmlDerived": True,
-            "note": (
-                "Derived mechanically from inputs/page.html. VISUAL_INTERPRETATION mediation "
-                "refines component list, shell/sidebar geometry, tokens, and interactions "
-                "against the HTML source of truth."
-            ),
+            "note": note,
             **html_summary,
             "referenceHtml": primary_html,
             "referenceImage": primary_image,
@@ -136,27 +151,272 @@ def build_visual_spec(
     }
 
 
+def _plain_html_text(inner: str, unescape: Any) -> str:
+    text = re.sub(r"<[^>]+>", " ", inner)
+    text = unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _iter_js_function_bodies(raw: str) -> list[tuple[str, str]]:
+    """Return ``(functionName, body)`` for top-level ``function name(){…}`` blocks."""
+    out: list[tuple[str, str]] = []
+    for m in re.finditer(r"function\s+(\w+)\s*\([^)]*\)\s*\{", raw):
+        name = m.group(1)
+        start = m.end()
+        depth = 1
+        i = start
+        while i < len(raw) and depth > 0:
+            ch = raw[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            continue
+        out.append((name, raw[start:i]))
+    return out
+
+
+# Hero / page-title helpers — matched by NAME SHAPE (the identifier contains
+# hero/title/header/heading/banner), NOT a fixed product-specific allowlist, so
+# any codebase's hero helper is recognized (shHero, sectionHeader, pageTitle, …).
+# First string arg = the title; second = the subtitle.
+_HERO_CALL_RE = re.compile(
+    r"\b\w*(?:hero|title|header|heading|banner)\w*\s*\(\s*[\"']([^\"'\n]{2,80})[\"']",
+    re.I,
+)
+_HERO_CALL_2ND_RE = re.compile(
+    r"\b\w*(?:hero|title|header|heading|banner)\w*\s*\(\s*"
+    r"[\"'][^\"'\n]+[\"']\s*,\s*[\"']([^\"'\n]{2,100})[\"']",
+    re.I,
+)
+# Quote-aware <button> matcher: an attribute value can itself contain '>' — e.g.
+# an inline arrow-function handler `onclick="()=>{…}"` — which a naive `[^>]*`
+# stops at, corrupting the captured label. Consuming quoted runs wholesale keeps
+# the real label intact. Generic across any HTML/JS-template mockup.
+_BUTTON_RE = re.compile(
+    r"<button\b(?:[^>\"']|\"[^\"]*\"|'[^']*')*>(.*?)</button>",
+    re.I | re.S,
+)
+
+
+def _name_tokens(name: str) -> list[str]:
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name or "")
+    spaced = spaced.replace("_", " ").replace("-", " ")
+    return [t.lower() for t in re.findall(r"[a-z0-9]{3,}", spaced.lower())]
+
+
+def _extract_html_views(raw: str, *, unescape: Any) -> list[dict[str, Any]]:
+    """Detect multi-screen mockup views from JS render functions + hero titles."""
+    views: list[dict[str, Any]] = []
+    for name, body in _iter_js_function_bodies(raw):
+        titles: list[str] = []
+        seen: set[str] = set()
+
+        def _add_title(text: str) -> None:
+            t = re.sub(r"\s+", " ", (text or "").strip())
+            if not t or not _looks_like_ui_copy(t):
+                return
+            key = t.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            titles.append(t)
+
+        for hm in _HERO_CALL_RE.finditer(body):
+            _add_title(unescape(hm.group(1)))
+        for hm in _HERO_CALL_2ND_RE.finditer(body):
+            _add_title(unescape(hm.group(1)))
+        for hm in re.finditer(r"<h1\b[^>]*>(.*?)</h1>", body, re.I | re.S):
+            _add_title(_plain_html_text(hm.group(1), unescape))
+
+        buttons: list[str] = []
+        for bm in _BUTTON_RE.finditer(body):
+            text = _plain_html_text(bm.group(1), unescape)
+            if text and text not in buttons:
+                buttons.append(text)
+
+        views.append(
+            {
+                "id": name,
+                "titles": titles,
+                "buttons": buttons,
+                "body": body,
+                "nameTokens": _name_tokens(name),
+            }
+        )
+    return views
+
+
+def _score_view_against_intake(view: dict[str, Any], intake_lower: str) -> int:
+    """Higher = better match between a mockup view and Jira/prompt intent."""
+    if not intake_lower:
+        return 0
+    score = 0
+    for title in view.get("titles") or []:
+        tl = title.lower()
+        if tl and tl in intake_lower:
+            score += 12
+        for tok in re.findall(r"[a-z0-9]{3,}", tl):
+            if tok in intake_lower:
+                score += 2
+    for tok in view.get("nameTokens") or []:
+        if tok in intake_lower:
+            score += 3
+    # Generic body-copy overlap: reward distinctive words the view's OWN visible
+    # copy (titles + buttons) shares with the intake text. No domain/product
+    # keyword list — this generalizes to any mockup, any language.
+    own_copy = " ".join((view.get("titles") or []) + (view.get("buttons") or [])).lower()
+    for tok in set(re.findall(r"[a-z]{4,}", own_copy)):
+        if tok in intake_lower:
+            score += 1
+    return score
+
+
+def _select_primary_html_view(
+    views: list[dict[str, Any]],
+    intake_text: str,
+) -> dict[str, Any] | None:
+    """Pick one view when multi-screen HTML is clearly pointed at by intake text.
+
+    Title/hero hits win first (longest matching title) so a ticket that names
+    ``My datasets`` but also mentions console SLA details does not harvest the
+    sibling console screen. Returns None when ambiguous — no guessing.
+    """
+    if len(views) < 2:
+        return None
+    intake_lower = re.sub(r"\s+", " ", (intake_text or "").lower()).strip()
+    if len(intake_lower) < 8:
+        return None
+
+    title_hits: list[tuple[int, dict[str, Any], str]] = []
+    for v in views:
+        for title in v.get("titles") or []:
+            tl = title.lower().strip()
+            if len(tl) >= 4 and tl in intake_lower:
+                title_hits.append((len(tl), v, title))
+    if title_hits:
+        title_hits.sort(key=lambda row: row[0], reverse=True)
+        best_len, best_view, _ = title_hits[0]
+        # Unique longest title match → lock that view.
+        longer_or_equal = [h for h in title_hits if h[0] == best_len]
+        distinct = {h[1]["id"] for h in longer_or_equal}
+        if len(distinct) == 1:
+            return best_view
+
+    ranked = sorted(
+        ((_score_view_against_intake(v, intake_lower), v) for v in views),
+        key=lambda pair: pair[0],
+        reverse=True,
+    )
+    best_score, best = ranked[0]
+    second = ranked[1][0] if len(ranked) > 1 else 0
+    if best_score < 8 or best_score < second + 3:
+        return None
+    return best
+
+
+def _summarize_html_raw(raw: str, *, unescape: Any) -> dict[str, Any]:
+    """Mechanical component/interaction extract from an HTML/JS-template blob."""
+    components: list[dict[str, Any]] = []
+    interactions: list[dict[str, Any]] = []
+    regions: list[dict[str, Any]] = []
+
+    def _plain(inner: str) -> str:
+        return _plain_html_text(inner, unescape)
+
+    for m in re.finditer(r"<h([1-6])[^>]*>(.*?)</h\1>", raw, re.I | re.S):
+        text = _plain(m.group(2))
+        if text:
+            components.append({"type": f"Heading{m.group(1)}", "text": text, "confidence": 0.9})
+
+    for m in _BUTTON_RE.finditer(raw):
+        text = _plain(m.group(1))
+        if text:
+            components.append({"type": "Button", "label": text, "confidence": 0.85})
+            interactions.append(
+                {
+                    "trigger": f"Click: {text}",
+                    "expectedBehavior": "(from requirement)",
+                    "confidence": 0.6,
+                }
+            )
+    for m in re.finditer(
+        r'<input[^>]+type=[\"\'](?:submit|button)[\"\'][^>]*value=[\"\']([^\"\']+)[\"\']',
+        raw,
+        re.I,
+    ):
+        text = unescape(m.group(1).strip())
+        if text:
+            components.append({"type": "Button", "label": text, "confidence": 0.8})
+
+    for m in re.finditer(
+        r"<(?:button|a|input|select|textarea|div|span)[^>]+"
+        r"(?:aria-label|title)=[\"']([^\"']+)[\"']",
+        raw,
+        re.I,
+    ):
+        text = unescape(m.group(1).strip())
+        if text:
+            components.append({"type": "Label", "text": text, "confidence": 0.75})
+
+    for m in re.finditer(r"<label\b[^>]*>(.*?)</label>", raw, re.I | re.S):
+        text = _plain(m.group(1))
+        if text:
+            components.append({"type": "Label", "text": text, "confidence": 0.8})
+    for m in re.finditer(r'<input[^>]+placeholder=[\"\']([^\"\']+)[\"\']', raw, re.I):
+        ph = unescape(m.group(1).strip())
+        if ph:
+            components.append({"type": "Input", "placeholder": ph, "confidence": 0.8})
+
+    for tag in ("nav", "header", "main", "footer", "aside", "section", "article"):
+        if re.search(rf"<{tag}[\s>]", raw, re.I):
+            regions.append({"id": tag, "type": tag, "confidence": 0.85})
+
+    if re.search(r"<table[\s>]", raw, re.I):
+        headers = re.findall(r"<th[^>]*>(.*?)</th>", raw, re.I | re.S)
+        cols = [_plain(h) for h in headers if _plain(h)]
+        components.append({"type": "Table", "columns": cols or [], "confidence": 0.85})
+
+    for text in _extract_js_ui_strings(raw, unescape=unescape):
+        components.append({"type": "Text", "text": text, "confidence": 0.7, "source": "js_ui_string"})
+
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for c in components:
+        key = f"{c.get('type')}:{c.get('text') or c.get('label') or c.get('placeholder') or ''}"
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c)
+
+    return {
+        "layout": {"regions": regions},
+        "components": deduped,
+        "interactions": interactions,
+        "visualTokens": {"colors": [], "typography": [], "spacing": []},
+        "uncertainFields": ["tokens", "exact_layout_bounds", "interactions"],
+        "exactTextHints": harvest_exact_texts_from_components(deduped),
+    }
+
+
 def _extract_html_structure(
     html_path: str,
     *,
     run_dir: Path | None = None,
+    intake_text: str = "",
 ) -> dict[str, Any]:
     """Mechanical DOM summary from a stored HTML file — no LLM.
 
-    Extracts headings, button labels, form field labels, link text, and
-    top-level landmark regions as structural hints for mediation.  Never
-    invents data that is not present in the file.
-
-    ``html_path`` may be run-relative (``inputs/page.html``); resolve against
-    ``run_dir`` when provided so MCP CWD cannot miss the file.
+    When the HTML mockup contains multiple ``function renderX()`` screens and
+    intake text clearly names one (title / hero / tokens), components and
+    exact-text hints are scoped to that view so sibling console/dashboard copy
+    does not pollute the SoT. ``viewButtonMap`` always stays whole-file for
+    cross-view leak checks.
     """
     import html as _html_mod
 
     from uiforgemax.pipeline.visual_sot import resolve_run_path
-
-    components: list[dict[str, Any]] = []
-    interactions: list[dict[str, Any]] = []
-    regions: list[dict[str, Any]] = []
 
     path = resolve_run_path(run_dir, html_path) if run_dir else None
     if path is None:
@@ -176,96 +436,64 @@ def _extract_html_structure(
             "uncertainFields": ["html file not readable"],
         }
 
-    def _plain(inner: str) -> str:
-        """Strip nested tags / collapse whitespace — works for HTML-in-JS templates too."""
-        text = re.sub(r"<[^>]+>", " ", inner)
-        text = _html_mod.unescape(text)
-        return re.sub(r"\s+", " ", text).strip()
-
-    # Headings (allow nested spans inside h1–h6)
-    for m in re.finditer(r"<h([1-6])[^>]*>(.*?)</h\1>", raw, re.I | re.S):
-        text = _plain(m.group(2))
-        if text:
-            components.append({"type": f"Heading{m.group(1)}", "text": text, "confidence": 0.9})
-
-    # Buttons (nested children ok) + input[type=submit/button] value
-    for m in re.finditer(r"<button\b[^>]*>(.*?)</button>", raw, re.I | re.S):
-        text = _plain(m.group(1))
-        if text:
-            components.append({"type": "Button", "label": text, "confidence": 0.85})
-            interactions.append(
-                {
-                    "trigger": f"Click: {text}",
-                    "expectedBehavior": "(from requirement)",
-                    "confidence": 0.6,
-                }
-            )
-    for m in re.finditer(
-        r'<input[^>]+type=[\"\'](?:submit|button)[\"\'][^>]*value=[\"\']([^\"\']+)[\"\']',
-        raw,
-        re.I,
-    ):
-        text = _html_mod.unescape(m.group(1).strip())
-        if text:
-            components.append({"type": "Button", "label": text, "confidence": 0.8})
-
-    # Accessible / tooltip labels on interactive elements (generic SoT cues)
-    for m in re.finditer(
-        r"<(?:button|a|input|select|textarea|div|span)[^>]+"
-        r"(?:aria-label|title)=[\"']([^\"']+)[\"']",
-        raw,
-        re.I,
-    ):
-        text = _html_mod.unescape(m.group(1).strip())
-        if text:
-            components.append({"type": "Label", "text": text, "confidence": 0.75})
-
-    # Form inputs / labels
-    for m in re.finditer(r"<label\b[^>]*>(.*?)</label>", raw, re.I | re.S):
-        text = _plain(m.group(1))
-        if text:
-            components.append({"type": "Label", "text": text, "confidence": 0.8})
-    for m in re.finditer(r'<input[^>]+placeholder=[\"\']([^\"\']+)[\"\']', raw, re.I):
-        ph = _html_mod.unescape(m.group(1).strip())
-        if ph:
-            components.append({"type": "Input", "placeholder": ph, "confidence": 0.8})
-
-    # Landmark regions
-    for tag in ("nav", "header", "main", "footer", "aside", "section", "article"):
-        if re.search(rf"<{tag}[\s>]", raw, re.I):
-            regions.append({"id": tag, "type": tag, "confidence": 0.85})
-
-    # Tables → DataGrid hint
-    if re.search(r"<table[\s>]", raw, re.I):
-        headers = re.findall(r"<th[^>]*>(.*?)</th>", raw, re.I | re.S)
-        cols = [_plain(h) for h in headers if _plain(h)]
-        components.append({"type": "Table", "columns": cols or [], "confidence": 0.85})
-
-    # JS/TS mockup helpers: label:/title:/heading: "…" and kpi("…") style first-args.
-    # Generic — not ticket-specific; only short human-facing strings.
-    for text in _extract_js_ui_strings(raw, unescape=_html_mod.unescape):
-        components.append({"type": "Text", "text": text, "confidence": 0.7, "source": "js_ui_string"})
-
-    # Deduplicate by (type, primary text field)
-    seen: set[str] = set()
-    deduped: list[dict[str, Any]] = []
-    for c in components:
-        key = f"{c.get('type')}:{c.get('text') or c.get('label') or c.get('placeholder') or ''}"
-        if key not in seen:
-            seen.add(key)
-            deduped.append(c)
-
-    exact_from_html = harvest_exact_texts_from_components(deduped)
-
-    return {
-        "layout": {"regions": regions},
-        "components": deduped,
-        "interactions": interactions,
-        "visualTokens": {"colors": [], "typography": [], "spacing": []},
-        "uncertainFields": ["tokens", "exact_layout_bounds", "interactions"],
-        "viewButtonMap": _extract_view_button_map(raw, unescape=_html_mod.unescape),
-        "exactTextHints": exact_from_html,
+    unescape = _html_mod.unescape
+    views = _extract_html_views(raw, unescape=unescape)
+    view_button_map = {
+        v["id"]: list(v.get("buttons") or [])
+        for v in views
+        if v.get("buttons")
     }
+    primary = _select_primary_html_view(views, intake_text)
+    source_raw = primary["body"] if primary else raw
+    summary = _summarize_html_raw(source_raw, unescape=unescape)
+    summary["viewButtonMap"] = view_button_map
+
+    # Helper-call titles (e.g. hero('My datasets', 'Datasets you own.')) are JS
+    # arguments, not DOM tags, so the mechanical tag harvest in _summarize_html_raw
+    # misses them even though they are the screen's most important copy. Fold the
+    # scoped view's titles (or every view's titles when unscoped) into
+    # exactTextHints so the deterministic exact-copy gate actually covers hero /
+    # heading text. Titles go first — highest-priority copy.
+    title_pool = (
+        list(primary.get("titles") or [])
+        if primary
+        else [t for v in views for t in (v.get("titles") or [])]
+    )
+    if title_pool:
+        hints = list(summary.get("exactTextHints") or [])
+        seen = {h.lower() for h in hints}
+        merged: list[str] = []
+        for t in title_pool:
+            tl = t.lower()
+            if tl not in seen and _looks_like_ui_copy(t):
+                seen.add(tl)
+                merged.append(t)
+        summary["exactTextHints"] = (merged + hints)[:40]
+
+    catalog = [
+        {
+            "id": v["id"],
+            "titles": list(v.get("titles") or []),
+            "buttonCount": len(v.get("buttons") or []),
+        }
+        for v in views
+    ]
+    if len(views) >= 2:
+        summary["htmlMultiView"] = True
+        summary["htmlViews"] = catalog
+    if primary:
+        summary["primaryHtmlView"] = primary["id"]
+        summary["primaryHtmlViewTitles"] = list(primary.get("titles") or [])
+        summary["outOfScopeHtmlViews"] = [c["id"] for c in catalog if c["id"] != primary["id"]]
+        fields = list(summary.get("uncertainFields") or [])
+        if "multi_view_html_scoped_by_intake" not in fields:
+            fields.append("multi_view_html_scoped_by_intake")
+        summary["uncertainFields"] = fields
+    elif len(views) >= 2:
+        summary["primaryHtmlView"] = None
+        summary["htmlViewScopeAmbiguous"] = True
+
+    return summary
 
 
 _JS_UI_PROP_RE = re.compile(
@@ -415,50 +643,26 @@ def apply_html_sot_to_compliance(
         assumptions = requirements.setdefault("assumptions", [])
         if note not in assumptions:
             assumptions.append(note)
+        if visual.get("primaryHtmlView"):
+            scope_note = (
+                f"HTML multi-view SoT scoped to `{visual['primaryHtmlView']}` "
+                f"(titles: {', '.join(visual.get('primaryHtmlViewTitles') or []) or 'n/a'}). "
+                "Do not implement sibling screens listed in outOfScopeHtmlViews."
+            )
+            if scope_note not in assumptions:
+                assumptions.append(scope_note)
 
 
 def _extract_view_button_map(raw: str, *, unescape: Any) -> dict[str, list[str]]:
     """Map each top-level ``function renderX(){...}`` block to its own literal
     button labels — e.g. ``{"renderMyData": ["Bind"], "renderProducerConsole":
     ["Register a physical dataset", ...]}``.
-
-    A JS-templated SoT (like a single-page mockup) renders each screen from its
-    own function; a button that's textually correct but sourced from a SIBLING
-    function (e.g. the Console page's "Register a physical dataset" leaking
-    onto the My Datasets page) is invisible to copy-fidelity checks — they only
-    ask "does this text match the HTML somewhere", not "does it belong on THIS
-    screen". This map lets a downstream check ask the second question.
-
-    Best-effort brace counting (no JS parser) — skips a function if its closing
-    brace can't be found instead of guessing wrong.
     """
-    view_map: dict[str, list[str]] = {}
-    for m in re.finditer(r"function\s+(\w+)\s*\([^)]*\)\s*\{", raw):
-        name = m.group(1)
-        start = m.end()
-        depth = 1
-        i = start
-        while i < len(raw) and depth > 0:
-            ch = raw[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-            i += 1
-        if depth != 0:
-            continue  # unbalanced — skip rather than mis-attribute
-        body = raw[start:i]
-        labels: list[str] = []
-        seen_labels: set[str] = set()
-        for bm in re.finditer(r"<button\b[^>]*>(.*?)</button>", body, re.I | re.S):
-            text = re.sub(r"<[^>]+>", " ", bm.group(1))
-            text = re.sub(r"\s+", " ", unescape(text)).strip()
-            if text and text not in seen_labels:
-                seen_labels.add(text)
-                labels.append(text)
-        if labels:
-            view_map[name] = labels
-    return view_map
+    return {
+        v["id"]: list(v.get("buttons") or [])
+        for v in _extract_html_views(raw, unescape=unescape)
+        if v.get("buttons")
+    }
 
 
 def _extract_prompt_intent(prompt: str) -> dict[str, Any]:
@@ -768,20 +972,44 @@ def normalize_run(run_dir: Path, policy: str, feedback: str | None = None) -> tu
     if not skip_visual and not greenfield:
         # visual_name is the primary SoT image path (if any), else a generic label.
         visual_name = sot.get("primaryImage") or sot.get("primaryHtml") or "prompt"
+        intake_blob = " ".join(
+            [
+                str(requirements.get("summary") or ""),
+                " ".join(str(x) for x in (requirements.get("scope") or {}).get("in") or []),
+                " ".join(
+                    str(ac.get("text") or "")
+                    for ac in (requirements.get("acceptanceCriteria") or [])
+                    if isinstance(ac, dict)
+                ),
+                prompt_text or "",
+            ]
+        )
         visual = build_visual_spec(
             visual_name,
             prompt=prompt_text,
             sot=sot,
             has_image=has_image,
             run_dir=run_dir,
+            intake_text=intake_blob,
         )
         # Image path returns a mediation shell and skips DOM extract — still harvest
         # exact copy from page.html when HTML SoT is present (any intake combo).
         if sot.get("primaryHtml") and not visual.get("exactTextHints"):
-            html_bits = _extract_html_structure(str(sot["primaryHtml"]), run_dir=run_dir)
+            html_bits = _extract_html_structure(
+                str(sot["primaryHtml"]), run_dir=run_dir, intake_text=intake_blob
+            )
             visual["exactTextHints"] = list(html_bits.get("exactTextHints") or [])
-            if html_bits.get("viewButtonMap") and not visual.get("viewButtonMap"):
-                visual["viewButtonMap"] = html_bits["viewButtonMap"]
+            for key in (
+                "viewButtonMap",
+                "primaryHtmlView",
+                "primaryHtmlViewTitles",
+                "outOfScopeHtmlViews",
+                "htmlMultiView",
+                "htmlViews",
+                "htmlViewScopeAmbiguous",
+            ):
+                if html_bits.get(key) is not None and not visual.get(key):
+                    visual[key] = html_bits[key]
             if not visual.get("htmlDerived"):
                 visual["htmlExactTextSource"] = sot.get("primaryHtml")
         apply_html_sot_to_compliance(requirements, visual, sot=sot)

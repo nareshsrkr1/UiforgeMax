@@ -214,6 +214,100 @@ def test_comment_or_dead_substring_does_not_satisfy_exact_copy(tmp_path: Path):
     assert any("My datasets" in f for f in fails)
 
 
+_MULTI_VIEW_HTML = """
+<!doctype html><html><body><script>
+function renderProducerConsole(){
+  return shHero('Producer Console', 'Ops overview') + `
+    <div>Publish SLA adherence</div>
+    <div>Feed delivery on-time</div>
+    <div>Subscription requests · awaiting your approval</div>
+    <button>Open registry</button>`;
+}
+function renderMyData(){
+  return shHero('My datasets', 'Datasets you own.') + `
+    <h1><span>My datasets</span></h1>
+    <p>Datasets you own.</p>
+    <table><th>Name</th><th>Status</th></table>
+    <button><span>Bind</span></button>`;
+}
+</script></body></html>
+"""
+
+
+def test_multi_view_html_scopes_to_intake_named_screen(tmp_path: Path):
+    """Whole-file harvest must not prefer sibling console when ticket names My datasets."""
+    page = tmp_path / "page.html"
+    page.write_text(_MULTI_VIEW_HTML, encoding="utf-8")
+    intake = (
+        "Producer persona My Datasets experience with consumer SLA visibility "
+        "and subscription approvals — implement the My datasets screen."
+    )
+    summary = _extract_html_structure(str(page), run_dir=tmp_path, intake_text=intake)
+    assert summary.get("htmlMultiView") is True
+    assert summary.get("primaryHtmlView") == "renderMyData"
+    assert "renderProducerConsole" in (summary.get("outOfScopeHtmlViews") or [])
+    hints = [h.lower() for h in summary.get("exactTextHints") or []]
+    assert "my datasets" in hints
+    assert "bind" in hints
+    # Console-only copy must not pollute scoped exact texts.
+    assert "publish sla adherence" not in hints
+    assert "subscription requests" not in " ".join(hints)
+    assert "producer console" not in hints
+
+
+def test_multi_view_ambiguous_without_intake_keeps_whole_file(tmp_path: Path):
+    page = tmp_path / "page.html"
+    page.write_text(_MULTI_VIEW_HTML, encoding="utf-8")
+    summary = _extract_html_structure(str(page), run_dir=tmp_path, intake_text="")
+    assert summary.get("primaryHtmlView") in (None, )
+    # Unscoped: console strings may appear in whole-file harvest.
+    hints = [h.lower() for h in summary.get("exactTextHints") or []]
+    assert "my datasets" in hints
+
+
+# A DIFFERENT domain (billing, not datasets) with a DIFFERENTLY-NAMED hero helper
+# (`sectionHeader`, not `shHero`) and an inline arrow-function onclick — proves the
+# extraction is not tied to this product's helper names, view ids, or domain words.
+_CROSS_DOMAIN_HTML = """
+<!doctype html><html><body><script>
+function renderBillingOverview(){
+  return sectionHeader('Billing overview', 'Everything you are charged for') + `
+    <div>Monthly recurring revenue</div>
+    <button onclick="()=>{openPlans();}">Change plan</button>`;
+}
+function renderInvoices(){
+  return sectionHeader('Your invoices', 'Download or dispute any invoice.') + `
+    <h1><span>Your invoices</span></h1>
+    <button onclick="()=>{doExport();}"><span>Download PDF</span></button>`;
+}
+</script></body></html>
+"""
+
+
+def test_generic_across_domain_and_helper_name(tmp_path: Path):
+    """No product/domain hardcoding: a billing mockup with a sectionHeader() hero
+    and arrow-function onclick must scope + harvest exact copy just like datasets."""
+    page = tmp_path / "page.html"
+    page.write_text(_CROSS_DOMAIN_HTML, encoding="utf-8")
+    intake = "Implement the Your invoices screen so users can download or dispute an invoice."
+    summary = _extract_html_structure(str(page), run_dir=tmp_path, intake_text=intake)
+
+    # Scoped to the intake-named screen, sibling billing overview out of scope.
+    assert summary.get("primaryHtmlView") == "renderInvoices"
+    assert "renderBillingOverview" in (summary.get("outOfScopeHtmlViews") or [])
+
+    hints = [h.lower() for h in summary.get("exactTextHints") or []]
+    # Hero title + subtitle harvested from the differently-named helper call.
+    assert "your invoices" in hints
+    assert any("download or dispute" in h for h in hints)
+    # Button label survives the arrow-function onclick '>' intact (not corrupted).
+    assert "download pdf" in hints
+    # Sibling-screen copy did not leak in.
+    assert "billing overview" not in hints
+    assert "change plan" not in hints
+    assert "monthly recurring revenue" not in " ".join(hints)
+
+
 def test_mediation_cannot_drop_html_locked_exact_texts(tmp_path: Path):
     from uiforgemax.model_mediation.service import _merge_visual
 
